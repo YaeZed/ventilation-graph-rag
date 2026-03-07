@@ -35,19 +35,18 @@ _(注意：请确保 `requirements.txt` 中包含 `neo4j`, `pymilvus`, `openai`,
 
 ### 2. 启动底层数据库
 
-系统运行依赖 Neo4j 和 Milvus，请确保 Docker Desktop 已经启动。
+系统运行依赖 Neo4j 和 Milvus。得益于完整的 `docker-compose.yml` 配置，你可以一键启动所有必需的数据库服务。
 
-**启动 Neo4j:**
-在项目根目录运行 docker-compose：
+**启动 Neo4j 和 Milvus:**
+在项目根目录运行 `docker-compose`：
 
 ```bash
-docker-compose up -d neo4j
+docker-compose up -d
 ```
 
-_启动后可访问 `http://localhost:7474`，默认用户名/密码在代码中配置为 `neo4j` / `160722yaesakura`。_
-
-**启动 Milvus:**
-因为本地 `docker-compose.yml` 中未包含 Milvus，所以你需要使用 Milvus 官方提供的单机版或利用 Docker Desktop 的方式把 Milvus 启动起来，并确保 `19530` 端口开启即可。
+_启动后：_
+_- Neo4j 可访问 `http://localhost:7475`，默认用户名/密码在代码中配置为 `neo4j` / `160722yaesakura`。_
+_- Milvus 将在后台运行并开放 `19530` 供代码连接。_
 
 ### 3. 配置环境变量
 
