@@ -1,0 +1,44 @@
+// 1. 查看全部 36 个条款
+MATCH (a:Article) RETURN a.name, a.title ORDER BY a.name
+
+// 2. 查看某条款的完整内容
+MATCH (a:Article {name: "第一百九十二条"})
+RETURN a.name, a.title, a.content
+
+// 3. 图谱整体概览（节点+关系数量）
+MATCH (n) RETURN labels(n)[0] AS 类型, count(n) AS 数量
+
+// 4. 查看所有显式引用关系（REFERENCES）
+MATCH p = (a:Article)-[:REFERENCES]->(b:Article)
+RETURN a.name AS 引用方, b.name AS 被引用方
+
+// 5. 查看条款间共享设施的关联（RELATED_TO）附带共享设施名
+MATCH (a1:Article)-[r:RELATED_TO]->(a2:Article)
+RETURN a1.name, r.via AS 共享设施, a2.name
+ORDER BY r.via
+
+// 6. 可视化所有条款网络（只看 Article 节点和它们之间的关系）
+MATCH p = (a1:Article)-[:REFERENCES|RELATED_TO]-(a2:Article)
+RETURN p
+
+// 7. 查询所有数值型安全指标（有上下限的）
+MATCH (a:Article)-[:CONSTRAINS]->(p:Parameter)-[:APPLIES_TO]->(l:Location)
+WHERE p.value_min IS NOT NULL OR p.value_max IS NOT NULL
+RETURN a.name AS 条款, p.name AS 指标, p.value_min AS 下限, p.value_max AS 上限, p.unit AS 单位
+
+// 8. 查看某条款的所有要求和涉及的设施
+MATCH (a:Article {name: "第一百八十三条"})-[:SPECIFIES]->(r:Requirement)-[:INVOLVES_FACILITY]->(f:Facility)
+RETURN a.name, r.content AS 要求, f.name AS 涉及设施
+
+// 9. 查找所有禁止行为类要求
+MATCH (a:Article)-[:SPECIFIES]->(r:Requirement)
+WHERE r.name = "禁止行为"
+RETURN a.name AS 条款, r.content AS 禁止内容
+
+// 10. 第一百五十六条的完整子图
+MATCH p = (a:Article {name:"第一百五十六条"})-[*1..2]-(n)
+RETURN p LIMIT 40
+
+// 11. 局部通风机涉及的所有条款
+MATCH p = (a:Article)-[:SPECIFIES]->(:Requirement)-[:INVOLVES_FACILITY]->(f:Facility {name:"局部通风机"})
+RETURN p

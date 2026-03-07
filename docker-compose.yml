@@ -1,0 +1,116 @@
+services:
+  neo4j:
+    image: neo4j:5.18
+    container_name: neo4j-db
+    ports:
+      - 7475:7474 # HTTP Web UI（7474 已被 neo4j-ventilation 占用，改用 7475）
+      - 7688:7687 # Bolt 协议（7687 已被 neo4j-ventilation 占用，改用 7688）
+    environment:
+      NEO4J_AUTH: neo4j/all-in-rag
+      NEO4J_dbms_connector_bolt_advertised__address: localhost:7687
+      # 允许从文件URL导入CSV
+      NEO4J_dbms_security_allow__csv__import__from__file__urls: "true"
+      # 设置导入目录
+      NEO4J_dbms_directories_import: "/import"
+      # 启用 APOC 插件
+      NEO4J_PLUGINS: '["apoc"]'
+      # APOC 配置
+      NEO4J_apoc_export_file_enabled: "true"
+      NEO4J_apoc_import_file_enabled: "true"
+      NEO4J_apoc_import_file_use__neo4j__config: "true"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - neo4j_plugins:/plugins
+      # 将cypher文件夹映射到容器的import目录（CSV文件在这里）
+      - ./cypher:/import
+      # 映射脚本目录
+      - ./cypher:/scripts
+    restart: unless-stopped
+    # 添加健康检查
+    healthcheck:
+      test:
+        ["CMD", "cypher-shell", "-u", "neo4j", "-p", "all-in-rag", "RETURN 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # 添加脚本执行服务
+  neo4j-init:
+    image: neo4j:5.18
+    container_name: neo4j-init
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    volumes:
+      - ./cypher:/scripts
+    command: >
+      sh -c "
+        echo 'Waiting for Neo4j to be ready...' &&
+        sleep 10 &&
+        echo 'Executing import script...' &&
+        cypher-shell -a bolt://neo4j:7687 -u neo4j -p all-in-rag -f /scripts/neo4j_import.cypher &&
+        echo 'Import completed!'
+      "
+    restart: "no"
+
+  # ── Milvus 官方推荐部署（Windows Docker 稳定）：etcd + MinIO + standalone
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    container_name: milvus-etcd
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    command: >
+      etcd
+      -advertise-client-urls=http://etcd:2379
+      -listen-client-urls=http://0.0.0.0:2379
+      --data-dir=/etcd
+    volumes:
+      - etcd_data:/etcd
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE.2023-03-13T19-46-17Z
+    container_name: milvus-minio
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    command: minio server /data --console-address ":9001"
+    ports:
+      - 9001:9001 # MinIO 控制台（可选，浏览器可访问）
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  milvus:
+    image: milvusdb/milvus:v2.3.4
+    container_name: milvus-standalone
+    command: milvus run standalone
+    ports:
+      - 19530:19530 # gRPC 接口（供 pymilvus 连接）
+      - 9091:9091 # HTTP 监控接口
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    volumes:
+      - milvus_data:/var/lib/milvus
+    depends_on:
+      - etcd
+      - minio
+    restart: unless-stopped
+
+volumes:
+  neo4j_data:
+  neo4j_logs:
+  neo4j_plugins:
+  etcd_data:
+  minio_data:
+  milvus_data:
