@@ -1,7 +1,7 @@
 """
 矿井通风安全规程 - 图数据准备模块
 
-继承 GraphDataPreparationModule，覆盖数据加载和文档构建逻辑，
+数据加载和文档构建逻辑
 适配通风规程知识图谱的节点模式（Article / Parameter / Requirement / Facility / Location）。
 """
 
@@ -9,17 +9,25 @@ import sys
 import os
 import logging
 from typing import List, Dict, Any
+from dataclasses import dataclass
 
+from neo4j import GraphDatabase
 from langchain_core.documents import Document
 
-# 把 rag_modules 加到导入路径
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-from rag_modules.graph_data_preparation import GraphDataPreparationModule, GraphNode
+
 
 logger = logging.getLogger(__name__)
 
+@dataclass
+# 装饰器：@dataclass 可以自动为类添加 __init__、__repr__ 等方法
+class GraphNode:
+    """图节点数据结构"""
+    node_id: str
+    labels: List[str]
+    name: str
+    properties: Dict[str, Any]
 
-class VentilationDataPreparationModule(GraphDataPreparationModule):
+class VentilationDataPreparationModule:
     """
     通风安全规程数据准备模块
     覆盖以下方法：
@@ -30,9 +38,23 @@ class VentilationDataPreparationModule(GraphDataPreparationModule):
 
     def __init__(self, uri: str, user: str, password: str, database: str = "neo4j"):
         # 复用父类连接逻辑，但修改为通风领域的字段名
-        super().__init__(uri, user, password, database)
+        # super().__init__(uri, user, password, database)
        
+        """
+        初始化图数据库连接
         
+        Args:
+            uri: Neo4j连接URI
+            user: 用户名
+            password: 密码
+            database: 数据库名称
+        """
+        self.uri = uri
+        self.user = user
+        self.password = password
+        self.database = database
+        self.driver = None
+
         # 通风领域专用数据容器
         self.articles: List[GraphNode]    = []  # 存放所有"条款"节点
         self.parameters: List[GraphNode]  = []  # 存放所有"安全指标"节点
@@ -46,7 +68,38 @@ class VentilationDataPreparationModule(GraphDataPreparationModule):
         self.recipes        = []
         self.ingredients    = []
         self.cooking_steps  = []
+
+        self.documents: List[Document] = []
+        self.chunks: List[Document] = []
+
+
+        self._connect()
         
+    def _connect(self):
+        """建立Neo4j连接"""
+        try:
+            self.driver = GraphDatabase.driver(
+                self.uri, 
+                auth=(self.user, self.password),
+                database=self.database
+            )
+            logger.info(f"已连接到Neo4j数据库: {self.uri}")
+            
+            # 测试连接
+            with self.driver.session() as session:
+                result = session.run("RETURN 1 as test")
+                test_result = result.single()
+                if test_result:
+                    logger.info("Neo4j连接测试成功")
+                    
+        except Exception as e:
+            logger.error(f"连接Neo4j失败: {e}")
+            raise
+    def close(self):
+        """关闭数据库连接"""
+        if hasattr(self, 'driver') and self.driver:
+            self.driver.close()
+            logger.info("Neo4j连接已关闭")
     # ──────────────────────────────────────────────────────────
     # 1. 加载图数据
     # ──────────────────────────────────────────────────────────
@@ -265,6 +318,102 @@ class VentilationDataPreparationModule(GraphDataPreparationModule):
         logger.info(f"成功构建 {len(documents)} 个条款文档")
         return documents
 
+    def chunk_documents(self, chunk_size: int = 500, chunk_overlap: int = 50) -> List[Document]:
+        """
+        对文档进行分块处理
+        
+        Args:
+            chunk_size: 分块大小
+            chunk_overlap: 重叠大小
+            
+        Returns:
+            分块后的文档列表
+        """
+        logger.info(f"正在进行文档分块，块大小: {chunk_size}, 重叠: {chunk_overlap}")
+        
+        if not self.documents:
+            raise ValueError("请先构建文档")
+        
+        chunks = []
+        chunk_id = 0
+        
+        for doc in self.documents:
+            content = doc.page_content
+            
+            # 简单的按长度分块
+            if len(content) <= chunk_size:
+                # 内容较短，不需要分块
+                chunk = Document(
+                    page_content=content,
+                    metadata={
+                        **doc.metadata,
+                        "chunk_id": f"{doc.metadata['node_id']}_chunk_{chunk_id}",
+                        "parent_id": doc.metadata["node_id"],
+                        "chunk_index": 0,
+                        "total_chunks": 1,
+                        "chunk_size": len(content),
+                        "doc_type": "chunk"
+                    }
+                )
+                chunks.append(chunk)
+                chunk_id += 1
+            else:
+                # 按章节分块（基于标题）
+                sections = content.split('\n## ')
+                if len(sections) <= 1:
+                    # 没有二级标题，按长度强制分块
+                    total_chunks = (len(content) - 1) // (chunk_size - chunk_overlap) + 1
+                    
+                    for i in range(total_chunks):
+                        start = i * (chunk_size - chunk_overlap)
+                        end = min(start + chunk_size, len(content))
+                        
+                        chunk_content = content[start:end]
+                        
+                        chunk = Document(
+                            page_content=chunk_content,
+                            metadata={
+                                **doc.metadata,
+                                "chunk_id": f"{doc.metadata['node_id']}_chunk_{chunk_id}",
+                                "parent_id": doc.metadata["node_id"],
+                                "chunk_index": i,
+                                "total_chunks": total_chunks,
+                                "chunk_size": len(chunk_content),
+                                "doc_type": "chunk"
+                            }
+                        )
+                        chunks.append(chunk)
+                        chunk_id += 1
+                else:
+                    # 按章节分块
+                    total_chunks = len(sections)
+                    for i, section in enumerate(sections):
+                        if i == 0:
+                            # 第一个部分包含标题
+                            chunk_content = section
+                        else:
+                            # 其他部分添加章节标题
+                            chunk_content = f"## {section}"
+                        
+                        chunk = Document(
+                            page_content=chunk_content,
+                            metadata={
+                                **doc.metadata,
+                                "chunk_id": f"{doc.metadata['node_id']}_chunk_{chunk_id}",
+                                "parent_id": doc.metadata["node_id"],
+                                "chunk_index": i,
+                                "total_chunks": total_chunks,
+                                "chunk_size": len(chunk_content),
+                                "doc_type": "chunk",
+                                "section_title": section.split('\n')[0] if i > 0 else "主标题"
+                            }
+                        )
+                        chunks.append(chunk)
+                        chunk_id += 1
+        
+        self.chunks = chunks
+        logger.info(f"文档分块完成，共生成 {len(chunks)} 个块")
+        return chunks
     # ──────────────────────────────────────────────────────────
     # 3. 统计信息（覆盖父类，使用通风领域字段）
     # ──────────────────────────────────────────────────────────
@@ -284,3 +433,7 @@ class VentilationDataPreparationModule(GraphDataPreparationModule):
                 / len(self.documents)
             )
         return stats
+
+    def __del__(self):
+        """析构函数，确保关闭连接"""
+        self.close() 

@@ -12,7 +12,8 @@
 import sys
 import os
 import logging
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Any, Optional
+from langchain_core.documents import Document
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from rag_modules.hybrid_retrieval import HybridRetrievalModule, RetrievalResult
@@ -420,3 +421,68 @@ class VentilationHybridRetrieval(HybridRetrievalModule):
         except Exception as e:
             logger.error(f"获取邻居节点失败: {e}")
             return []
+
+    # ──────────────────────────────────────────────────────────
+    # 6. 统一检索逻辑：解决字段名不匹配问题
+    # ──────────────────────────────────────────────────────────
+    def dual_level_retrieval(self, query: str, top_k: int = 5) -> List[Document]:
+        """通风版：合并实体级和主题级检索结果"""
+        entity_kw, topic_kw = self.extract_query_keywords(query)
+        entity_res = self.entity_level_retrieval(entity_kw, top_k)
+        topic_res  = self.topic_level_retrieval(topic_kw, top_k)
+        
+        all_res = entity_res + topic_res
+        seen = set()
+        unique = []
+        for r in sorted(all_res, key=lambda x: x.relevance_score, reverse=True):
+            if r.node_id not in seen:
+                seen.add(r.node_id)
+                unique.append(r)
+        
+        docs = []
+        for r in unique[:top_k]:
+            meta = r.metadata.copy()
+            # 补全字段映射，防止上层代码报错
+            meta["article_name"] = meta.get("name") or meta.get("art_name") or "未知条款"
+            meta["node_id"] = r.node_id
+            docs.append(Document(page_content=r.content, metadata=meta))
+        return docs
+
+    def vector_search_enhanced(self, query: str, top_k: int = 5) -> List[Document]:
+        """向量检索并补全通风邻居信息"""
+        try:
+            vector_res = self.milvus_module.similarity_search(query, k=top_k*2)
+            docs = []
+            for res in vector_res:
+                content = res.get("text", "")
+                metadata = res.get("metadata", {})
+                node_id = metadata.get("node_id")
+                
+                # 加载邻居信息
+                if node_id:
+                    nbs = self._get_node_neighbors(node_id)
+                    if nbs:
+                        content += f"\n相关参考: {', '.join(nbs)}"
+                
+                docs.append(Document(
+                    page_content=content,
+                    metadata={
+                        **metadata,
+                        "score": res.get("score", 0.0),
+                        "search_type": "vector_enhanced"
+                    }
+                ))
+            return docs[:top_k]
+        except Exception as e:
+            logger.error(f"增强向量检索失败: {e}")
+            return []
+
+    def close(self):
+        """关闭资源连接"""
+        if self.driver:
+            from neo4j import exceptions
+            try:
+                self.driver.close()
+            except:
+                pass
+            logger.info("Neo4j连接已关闭")

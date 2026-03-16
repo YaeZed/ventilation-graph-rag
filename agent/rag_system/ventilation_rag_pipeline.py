@@ -43,7 +43,8 @@ from ventilation_data_preparation import VentilationDataPreparationModule
 from ventilation_generation import VentilationGenerationModule
 from ventilation_hybrid_retrieval import VentilationHybridRetrieval
 from ventilation_graph_rag_retrieval import VentilationGraphRAGRetrieval
-from rag_modules.milvus_index_construction import MilvusIndexConstructionModule
+# from rag_modules.milvus_index_construction import MilvusIndexConstructionModule
+from ventilation_milvus_index_construction import VentilationMilvusIndexConstruction
 from rag_modules.intelligent_query_router import IntelligentQueryRouter
 
 # ══════════════════════════════════════════════════════════════
@@ -131,7 +132,7 @@ class VentilationRAGPipeline:
 
         # ── 3. Milvus 向量索引
         logger.info("[3/5] 初始化 Milvus 向量索引...")
-        self.milvus_module = MilvusIndexConstructionModule(
+        self.milvus_module = VentilationMilvusIndexConstruction(
             host=cfg.milvus_host,
             port=cfg.milvus_port,
             collection_name=cfg.collection_name,
