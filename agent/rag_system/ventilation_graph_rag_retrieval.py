@@ -1,147 +1,101 @@
 """
-矿井通风安全规程 - 图 RAG 检索模块（深度优化版）
+矿井通风安全规程 - 图 RAG 检索模块
 
-继承 GraphRAGRetrieval，覆盖：
-  1. understand_graph_query() - 将图 Schema 说明从烹饪改为通风规程
-  2. _build_graph_index()     - 用 node_id 替代 nodeId 属性
+完全独立的图 RAG 检索模块，执行复杂的图结构推理和多步路径查询。
+支持对通风参数、设施安装要求、巷道合规性进行深度图搜索。
 """
 
-import sys
-import os
 import json
 import logging
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-from rag_modules.graph_rag_retrieval import GraphRAGRetrieval, GraphQuery, QueryType
+from enum import Enum
+from dataclasses import dataclass
+from collections import defaultdict, deque
+from typing import List, Dict, Tuple, Any, Optional, Set
+from neo4j import GraphDatabase
+from langchain_core.documents import Document
 
 logger = logging.getLogger(__name__)
 
+class QueryType(Enum):
+    """查询类型枚举"""
+    ENTITY_RELATION = "entity_relation"  # 实体关系查询
+    MULTI_HOP = "multi_hop"              # 多跳查询
+    SUBGRAPH = "subgraph"                # 子图查询
+    PATH_FINDING = "path_finding"        # 路径查找
+    CLUSTERING = "clustering"            # 聚类查询
 
-class VentilationGraphRAGRetrieval(GraphRAGRetrieval):
+@dataclass
+class GraphQuery:
+    """图查询结构"""
+    query_type: QueryType
+    source_entities: List[str]
+    target_entities: List[str] = None
+    relation_types: List[str] = None
+    max_depth: int = 2
+    max_nodes: int = 50
+    constraints: Dict[str, Any] = None
+
+@dataclass
+class GraphPath:
+    """图路径结构"""
+    nodes: List[Dict[str, Any]]
+    relationships: List[Dict[str, Any]]
+    path_length: int
+    relevance_score: float
+    path_type: str
+
+@dataclass
+class KnowledgeSubgraph:
+    """知识子图结构"""
+    central_nodes: List[Dict[str, Any]]
+    connected_nodes: List[Dict[str, Any]]
+    relationships: List[Dict[str, Any]]
+    graph_metrics: Dict[str, float]
+    reasoning_chains: List[str]
+
+class VentilationGraphRAGRetrieval:
     """
-    通风安全规程图 RAG 检索系统
-
-    重写的核心方法：
-        understand_graph_query()  - 通风规程 Schema 的查询意图理解
-        _build_graph_index()      - 用 node_id 而非 nodeId 属性
+    通风安全规程图 RAG 检索系统 - 独立版
+    核心能力：
+    1. 通风规程意图理解：识别规程条款、设施、参数间的关联意图
+    2. 多跳规程链条追踪：解决“A故障导致B要求生效”这类逻辑链
+    3. 结构化子图提取：获取针对某一地点或设施的完整安全知识网络
     """
+    
+    def __init__(self, config, llm_client):
+        self.config = config
+        self.llm_client = llm_client
+        self.driver = None
+        
+        # 缓存系统
+        self.entity_cache = {}
+        self.relation_cache = {}
+        
+        # 连接准备
+        self._init_connection()
 
-    # ──────────────────────────────────────────────────────────
-    # 1. 理解查询意图：通风规程图 Schema
-    # ──────────────────────────────────────────────────────────
-    def understand_graph_query(self, query: str) -> GraphQuery:
-        """
-        将自然语言问题映射到通风规程知识图谱结构上
-        使用通风领域正确的节点类型和关系类型
-        """
-        prompt = f"""
-你是图数据库专家，请分析以下查询并映射到**矿井通风安全规程知识图谱**的结构上。
-
-已知图谱 Schema：
-- 节点类型：
-  - Article（条款）：name（如"第一百七十七条"）、title（主题）、content（原文）
-  - Parameter（数值指标）：name、value_min、value_max、unit
-  - Requirement（安全要求）：name（要求类型）、content（要求内容）
-  - Facility（通风设施）：name（如"主要通风机"、"局部通风机"、"风门"）
-  - Location（适用地点）：name（如"掘进工作面"、"回风巷"、"采煤工作面"）
-
-- 主要关系：
-  - (Article)-[:CONSTRAINS]->(Parameter)     条款规定数值参数
-  - (Parameter)-[:APPLIES_TO]->(Location)    参数适用于某地点
-  - (Article)-[:SPECIFIES]->(Requirement)    条款规定安全要求
-  - (Requirement)-[:INVOLVES_FACILITY]->(Facility) 要求涉及某设施
-  - (Article)-[:RELATED_TO]-(Article)        条款间关联
-  - (Article)-[:REFERENCES]->(Article)       条款引用其他条款
-
-查询：{query}
-
-请识别：
-1. query_type（查询类型）：
-   - entity_relation: 询问特定实体的直接信息（如：局部通风机的要求？）
-   - multi_hop: 需要多跳推理（如：主通风机失电后的备用通风机切换程序）
-   - subgraph: 需要完整子图（如：掘进工作面相关的所有通风要求）
-   - path_finding: 路径查找（如：从设施到条款的关联路径）
-   - clustering: 聚类相似（如：有哪些条款都涉及主要通风机）
-
-2. source_entities（源实体，必须是图中可能存在的节点名称）：
-   - 优先选择：具体设施名、条款编号、地点名、指标名
-   - 不要放抽象概念，如"违规"、"安全"等
-
-3. target_entities：只在需要限制路径终点时填写，否则为 []
-
-4. relation_types：本次推理优先考虑的关系类型列表
-   例如：["CONSTRAINS", "APPLIES_TO"] 或 ["SPECIFIES", "INVOLVES_FACILITY"]
-
-5. max_depth：建议的图遍历深度（1-3 整数）
-
-6. constraints（属性级约束，用于后处理过滤）：
-   例如：{{"location": ["掘进工作面"], "facility_type": ["主要通风机"]}}
-
-示例1：
-查询："局部通风机的安装要求有哪些？"
-{{
-  "query_type": "subgraph",
-  "source_entities": ["局部通风机"],
-  "target_entities": [],
-  "relation_types": ["INVOLVES_FACILITY", "SPECIFIES"],
-  "max_depth": 2,
-  "constraints": {{}}
-}}
-
-示例2：
-查询："掘进工作面风速不达标时应该怎么处理？"
-{{
-  "query_type": "multi_hop",
-  "source_entities": ["掘进工作面", "最低风速"],
-  "target_entities": [],
-  "relation_types": ["APPLIES_TO", "CONSTRAINS", "SPECIFIES"],
-  "max_depth": 3,
-  "constraints": {{"location": ["掘进工作面"]}}
-}}
-
-请严格返回合法 JSON 对象，不包含多余说明：
-"""
+    def _init_connection(self):
+        """初始化 Neo4j 连接"""
         try:
-            response = self.llm_client.chat.completions.create(
-                model=self.config.llm_model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_tokens=800,
-            )
-            raw = response.choices[0].message.content.strip()
-            # 去除可能的 markdown 代码块包裹
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-            result = json.loads(raw)
-
-            return GraphQuery(
-                query_type=QueryType(result.get("query_type", "subgraph")),
-                source_entities=result.get("source_entities", []),
-                target_entities=result.get("target_entities", []),
-                relation_types=result.get("relation_types", []),
-                max_depth=result.get("max_depth", 2),
-                max_nodes=50,
-            )
-
+            uri = getattr(self.config, "neo4j_uri", "")
+            user = getattr(self.config, "neo4j_user", "")
+            pwd = getattr(self.config, "neo4j_password", "")
+            self.driver = GraphDatabase.driver(uri, auth=(user, pwd))
+            logger.info("图 RAG 检索 Neo4j 连接成功")
         except Exception as e:
-            logger.error(f"查询意图理解失败（降级为 subgraph）: {e}")
-            return GraphQuery(
-                query_type=QueryType.SUBGRAPH,
-                source_entities=[query],
-                max_depth=2,
-            )
+            logger.error(f"图 RAG Neo4j 连接失败: {e}")
 
-    # ──────────────────────────────────────────────────────────
-    # 2. 图索引构建：用 node_id 替代 nodeId
-    # ──────────────────────────────────────────────────────────
+    def initialize(self):
+        """构建初始化图索引"""
+        if not self.driver: return
+        self._build_graph_index()
+
     def _build_graph_index(self):
-        """通风规程版本：构建图结构索引（entity_cache / relation_cache）"""
+        """构建通风领域节点索引"""
         logger.info("构建通风规程图结构索引...")
         try:
             with self.driver.session() as session:
-                # 用 node_id 属性（通风版）替代原来的 nodeId
+                # 使用通用的 node_id 属性
                 entity_query = """
                 MATCH (n)
                 WHERE n.node_id IS NOT NULL
@@ -157,239 +111,246 @@ class VentilationGraphRAGRetrieval(GraphRAGRetrieval):
                 for record in result:
                     nid = record["node_id"]
                     self.entity_cache[nid] = {
-                        "labels":   record["node_labels"],
-                        "name":     record["name"],
+                        "labels": record["node_labels"],
+                        "name": record["name"],
                         "category": record["category"],
-                        "degree":   record["degree"],
+                        "degree": record["degree"]
                     }
-
-                # 关系类型统计（不变）
-                rel_query = """
-                MATCH ()-[r]->()
-                RETURN type(r) AS rel_type, count(r) AS frequency
-                ORDER BY frequency DESC
-                """
-                result = session.run(rel_query)
-                for record in result:
-                    self.relation_cache[record["rel_type"]] = record["frequency"]
-
-                logger.info(f"通风规程图索引完成: "
-                            f"{len(self.entity_cache)} 个实体, "
-                            f"{len(self.relation_cache)} 个关系类型")
-
+                
+                logger.info(f"图索引加载成功: {len(self.entity_cache)} 个实体")
         except Exception as e:
-            logger.error(f"构建图结构索引失败: {e}")
+            logger.error(f"构建图索引失败: {e}")
 
-    # ──────────────────────────────────────────────────────────
-    # 3. 核心修复：从图路径/子图回查完整条款内容
-    # ──────────────────────────────────────────────────────────
+    def understand_graph_query(self, query: str) -> GraphQuery:
+        """解析用户问题的通风规程图检索意图"""
+        prompt = f"""你是矿井通风安全专家，请分析以下查询并映射到通风规程图谱结构。
+
+已知图谱 Schema：
+- 节点类型：Article(条款), Parameter(数值参数), Requirement(安全要求), Facility(通风设施), Location(适用地点)
+- 主要关系：CONSTRAINS, APPLIES_TO, SPECIFIES, INVOLVES_FACILITY, REFERENCES, RELATED_TO
+
+查询：{query}
+
+请识别以下字段并返回 JSON：
+1. query_type: entity_relation, multi_hop, subgraph, path_finding
+2. source_entities: 图中存在的具体节点名（如"第一百条"、"局部通风机"）
+3. target_entities: 针对路径查找的终点，通常为空 []
+4. relation_types: 相关的关系名
+5. max_depth: 遍历深度 (1-3)
+6. constraints: 属性过滤条件
+
+返回 JSON 示例：
+{{
+  "query_type": "subgraph",
+  "source_entities": ["局部通风机"],
+  "target_entities": [],
+  "relation_types": ["INVOLVES_FACILITY", "SPECIFIES"],
+  "max_depth": 2,
+  "constraints": {{}}
+}}
+"""
+        try:
+            response = self.llm_client.chat.completions.create(
+                model=getattr(self.config, 'llm_model', 'qwen-plus'),
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1
+            )
+            content = response.choices[0].message.content.strip()
+            if content.startswith("```json"): content = content[7:-3].strip()
+            result = json.loads(content)
+            
+            return GraphQuery(
+                query_type=QueryType(result.get("query_type", "subgraph")),
+                source_entities=result.get("source_entities", []),
+                target_entities=result.get("target_entities", []),
+                relation_types=result.get("relation_types", []),
+                max_depth=result.get("max_depth", 2)
+            )
+        except Exception as e:
+            logger.error(f"理解图查询意图失败: {e}")
+            return GraphQuery(query_type=QueryType.SUBGRAPH, source_entities=[query])
+
+    def graph_rag_search(self, query: str, top_k: int = 5) -> List[Document]:
+        """图 RAG 主搜索接口"""
+        if not self.driver: return []
+        
+        # 1. 意图理解
+        graph_query = self.understand_graph_query(query)
+        
+        # 2. 遍历执行
+        results = []
+        if graph_query.query_type in [QueryType.MULTI_HOP, QueryType.PATH_FINDING, QueryType.ENTITY_RELATION]:
+            paths = self._execute_multi_hop(graph_query)
+            results = self._paths_to_documents(paths)
+        elif graph_query.query_type == QueryType.SUBGRAPH:
+            subgraph = self._extract_subgraph(graph_query)
+            results = self._subgraph_to_documents(subgraph)
+            
+        return results[:top_k]
+
+    def _execute_multi_hop(self, graph_query: GraphQuery) -> List[GraphPath]:
+        """多跳图遍历核心逻辑"""
+        paths = []
+        try:
+            with self.driver.session() as session:
+                depth = graph_query.max_depth
+                # 模糊匹配节点名，并向外拓展找寻 Article 节点
+                cypher = f"""
+                UNWIND $source_entities AS sname
+                MATCH (s) WHERE s.name CONTAINS sname OR s.node_id = sname
+                MATCH p = (s)-[*0..{depth}]-(t)
+                WHERE (t:Article OR labels(t)[0] = 'Article' OR t.node_id STARTS WITH 'art_')
+                WITH p, length(p) AS len, nodes(p) AS ns, relationships(p) AS rs
+                ORDER BY len ASC
+                LIMIT 20
+                RETURN ns, rs, len
+                """
+                res = session.run(cypher, {"source_entities": graph_query.source_entities})
+                for record in res:
+                    paths.append(GraphPath(
+                        nodes=[dict(n) for n in record["ns"]],
+                        relationships=[dict(r) for r in record["rs"]],
+                        path_length=record["len"],
+                        relevance_score=1.0/(record["len"] + 1),
+                        path_type="multi_hop"
+                    ))
+                
+                if not paths:
+                    logger.warning(f"直接路径未找到条款，尝试利用关联关系进行 2 跳外推...")
+                    fallback_cypher = """
+                    UNWIND $source_entities AS sname
+                    MATCH (s) WHERE s.name CONTAINS sname OR s.node_id = sname
+                    MATCH (s)-[*1..2]-(a:Article)
+                    RETURN DISTINCT a.node_id AS nid LIMIT 5
+                    """
+                    f_res = session.run(fallback_cypher, {"source_entities": graph_query.source_entities})
+                    nids = [r["nid"] for r in f_res]
+                    if nids:
+                        logger.info(f"回退查找成功，找到关联条款 ID: {nids}")
+                        # 构造虚拟路径以触发内容回查
+                        for nid in nids:
+                            paths.append(GraphPath(nodes=[{"node_id": nid}], relationships=[], path_length=1, relevance_score=0.5, path_type="fallback"))
+                            
+            logger.info(f"多跳遍历完成，初步路径数: {len(paths)}")
+        except Exception as e:
+            logger.error(f"执行多跳遍历解析失败: {e}")
+        return paths
+
+    def _extract_subgraph(self, graph_query: GraphQuery) -> KnowledgeSubgraph:
+        """子图提取逻辑"""
+        try:
+            with self.driver.session() as session:
+                cypher = f"""
+                UNWIND $source_entities AS sname
+                MATCH (s) WHERE s.name CONTAINS sname OR s.node_id = sname
+                MATCH (s)-[r*1..{graph_query.max_depth}]-(n)
+                RETURN s, collect(DISTINCT n) AS neighbors, collect(DISTINCT r) AS rels
+                """
+                result = session.run(cypher, {"source_entities": graph_query.source_entities})
+                record = result.single()
+                if record:
+                    return KnowledgeSubgraph(
+                        central_nodes=[dict(record["s"])],
+                        connected_nodes=[dict(n) for n in record["neighbors"]],
+                        relationships=[dict(r) for r in record["rels"]],
+                        graph_metrics={},
+                        reasoning_chains=[]
+                    )
+        except Exception as e:
+            logger.error(f"子图提取解析失败: {e}")
+        return KnowledgeSubgraph([], [], [], {}, [])
+
     def _fetch_article_content(self, node_ids: list, max_articles: int = 5) -> list:
-        """
-        按 Article node_id 列表从 Neo4j 回查完整条款内容
-        （包含数值指标、安全要求、涉及设施）
-        返回 list[Document]
-        """
-        from langchain_core.documents import Document
-
-        if not self.driver or not node_ids:
-            return []
-
+        """从 Neo4j 回查通风规程条款完整详情"""
+        if not node_ids: return []
         docs = []
         try:
             with self.driver.session() as session:
-                art_query = """
+                # 强化查询逻辑：同时尝试精确 ID 匹配和名称模糊匹配
+                cypher = """
                 UNWIND $ids AS nid
-                MATCH (a:Article {node_id: nid})
+                MATCH (a:Article) 
+                WHERE a.node_id = nid OR a.node_id CONTAINS nid OR nid CONTAINS a.node_id OR a.name CONTAINS nid
+                WITH DISTINCT a
                 OPTIONAL MATCH (a)-[:CONSTRAINS]->(p:Parameter)
-                OPTIONAL MATCH (p)-[:APPLIES_TO]->(loc:Location)
                 OPTIONAL MATCH (a)-[:SPECIFIES]->(req:Requirement)
-                OPTIONAL MATCH (req)-[:INVOLVES_FACILITY]->(fac:Facility)
-                OPTIONAL MATCH (a)-[:REFERENCES]->(ref_a:Article)
-                WITH a,
-                     collect(DISTINCT {
-                         name: p.name,
-                         value_min: p.value_min,
-                         value_max: p.value_max,
-                         unit: p.unit,
-                         location: loc.name
-                     }) AS params,
-                     collect(DISTINCT {
-                         type: req.name,
-                         content: req.content,
-                         facility: fac.name
-                     }) AS reqs,
-                     collect(DISTINCT {
-                         name: ref_a.name,
-                         content: ref_a.content
-                     })[0..3] AS references
-                RETURN a.node_id AS node_id,
-                       a.name    AS name,
-                       a.title   AS title,
-                       a.content AS content,
-                       params, reqs, references
+                RETURN a.node_id AS node_id, a.name AS name, a.title AS title, a.content AS content,
+                       collect(DISTINCT p) AS params, collect(DISTINCT req) AS reqs
+                LIMIT $limit
                 """
-                result = session.run(art_query, {"ids": list(node_ids)[:max_articles]})
-
-                for record in result:
-                    parts = []
-
-                    # 条款头部
-                    art_name  = record["name"] or ""
-                    art_title = record["title"] or ""
-                    parts.append(f"# {art_name}")
-                    if art_title:
-                        parts.append(f"## 主题：{art_title}")
-
-                    # 条款原文
-                    if record.get("content"):
-                        parts.append(f"\n## 条款原文\n{record['content']}")
-
-                    # 数值指标
-                    params = [p for p in record["params"]
-                              if p.get("name") and p["name"] is not None]
-                    if params:
-                        parts.append("\n## 数值指标")
-                        for p in params:
-                            line = f"- 【指标】{p['name']}"
-                            if p.get("value_min") is not None:
-                                line += f"：≥{p['value_min']}"
-                            if p.get("value_max") is not None:
-                                line += f"（上限 {p['value_max']}）"
-                            if p.get("unit"):
-                                line += f" {p['unit']}"
-                            if p.get("location"):
-                                line += f"（适用：{p['location']}）"
-                            parts.append(line)
-
-                    # 安全要求
-                    reqs = [r for r in record["reqs"]
-                            if r.get("type") and r["type"] is not None]
-                    if reqs:
-                        parts.append("\n## 安全要求")
-                        seen = set()
-                        for r in reqs:
-                            req_key = r["type"]
-                            if req_key in seen:
-                                continue
-                            seen.add(req_key)
-                            line = f"- 【要求】{r['type']}"
-                            if r.get("content"):
-                                line += f"：{r['content'][:150]}"
-                            if r.get("facility"):
-                                line += f"（涉及设施：{r['facility']}）"
-                            parts.append(line)
-
-                    # 补充引用
-                    if record.get("references"):
-                        for ref in record["references"]:
-                            if ref.get("name") and ref.get("content"):
-                                parts.append(f"\n## 【补充引用】{ref['name']}\n{ref['content'][:200]}...")
-
-                    full_text = "\n".join(parts)
+                res = session.run(cypher, {"ids": list(node_ids), "limit": max_articles})
+                for record in res:
+                    text = f"# {record['name']}\n{record['title']}\n\n{record['content']}"
+                    # 附加数值和要求
+                    if record["params"]:
+                        text += "\n\n【数值指标】\n" + "\n".join([f"- {p['name']}: {p.get('value_min','')}~{p.get('value_max','')}" for p in record["params"]])
+                    if record["reqs"]:
+                        text += "\n\n【安全要求】\n" + "\n".join([f"- {r['name']}: {r.get('content','')[:100]}" for r in record["reqs"]])
+                    
                     docs.append(Document(
-                        page_content=full_text,
+                        page_content=text,
                         metadata={
-                            "node_id":   record["node_id"] or "",
-                            "node_type": "Article",
-                            "name":      art_name,
-                            "title":     art_title,
-                            "search_type": "graph_enriched",
-                            "relevance_score": 0.9,
-                        },
+                            "node_id": record["node_id"],
+                            "article_name": record["name"],
+                            "search_type": "graph_rag"
+                        }
                     ))
-
         except Exception as e:
-            logger.error(f"回查条款内容失败: {e}")
-
+            logger.error(f"回查条款失败: {e}")
         return docs
 
-    def _paths_to_documents(self, paths, query: str) -> list:
-        """
-        覆盖父类：从路径节点中收集 Article node_id，
-        回查 Neo4j 取完整条款内容，而不只是路径字符串描述
-        """
-        from langchain_core.documents import Document
-
-        # 收集路径里所有 Article 节点的 node_id
-        article_ids = []
-        seen = set()
+    def _paths_to_documents(self, paths: List[GraphPath]) -> List[Document]:
+        """将路径转换为具体条款文档"""
+        article_ids = set()
         for path in paths:
             for node in path.nodes:
+                # 强化版 ID 提取
+                nid = node.get("node_id") or node.get("nodeId")
+                if not nid and "properties" in node:
+                    nid = node["properties"].get("node_id") or node["properties"].get("nodeId")
+                
+                if not nid: continue
+
+                # 判定规则：
+                # 1. 直接是 Article
+                # 2. ID 以 art_ 开头
+                # 3. ID 格式为 PAR_第一百八十条-M1 等，需提取中间的条款名
                 labels = node.get("labels", [])
-                nid    = node.get("id") or node.get("properties", {}).get("node_id")
-                # 优先用 properties 里的 node_id
-                if not nid:
-                    nid = node.get("properties", {}).get("node_id")
-                if nid and nid not in seen:
-                    seen.add(nid)
-                    if "Article" in labels:
-                        article_ids.append(nid)
+                if not labels and "labels" in node: labels = node["labels"]
+                
+                if "Article" in labels or nid.startswith("art_"):
+                    article_ids.add(nid)
+                elif "_" in nid and ("PAR_" in nid or "FAC_" in nid or "REQ_" in nid):
+                    # 尝试从 PAR_第一百八十条-xxx 中提取出“第一百八十条”作为回查线索
+                    # 或者如果是 node_id 模式，找到它所属的 article 节点
+                    try:
+                        parts = nid.split('_')
+                        if len(parts) >= 2:
+                            term = parts[1].split('-')[0]
+                            # 我们需要将这个 term 转回真正的 node_id (art_xxx)
+                            # 最稳妥的方法是利用它去查一次
+                            article_ids.add(f"art_{term}")
+                    except: pass
+        
+        if not article_ids:
+            logger.warning(f"未能从 {len(paths)} 条路径中解析出任何 Article ID。")
+        else:
+            logger.info(f"解析到待回查条款 ID: {article_ids}")
+            
+        return self._fetch_article_content(list(article_ids))
 
-        # 如果没有直接找到 Article，尝试查询相连的 Article 节点
-        if not article_ids and seen:
-            logger.info(f"路径中未直接找到 Article 节点，尝试根据收集到的 {len(seen)} 个非条款节点查询相关联的条款")
-            try:
-                with self.driver.session() as session:
-                    res = session.run("""
-                        UNWIND $nids AS nid
-                        MATCH (n {node_id: nid})
-                        MATCH (n)-[*]-(a:Article)
-                        RETURN DISTINCT a.node_id AS art_id LIMIT 5
-                    """, {"nids": list(seen)})
-                    article_ids = [r["art_id"] for r in res]
-            except Exception as e:
-                logger.error(f"拓展查找相连 Article 失败: {e}")
-
-        if article_ids:
-            logger.info(f"图路径关联中找到 {len(article_ids)} 个 Article 节点，回查完整内容")
-            return self._fetch_article_content(article_ids)
-
-        # 降级：返回路径字符串描述（原父类行为）
-        logger.warning("路径及其周边均未找到 Article 节点，返回结构描述")
-        return super()._paths_to_documents(paths, query)
-
-    def _subgraph_to_documents(self, subgraph, reasoning_chains: list, query: str) -> list:
-        """
-        覆盖父类：从子图中收集 Article node_id，
-        回查 Neo4j 取完整条款内容
-        """
-        # 收集子图里所有 Article 节点的 node_id
-        article_ids = []
-        seen = set()
-
-        all_nodes = list(subgraph.central_nodes) + list(subgraph.connected_nodes)
+    def _subgraph_to_documents(self, subgraph: KnowledgeSubgraph) -> List[Document]:
+        """将子图转换为具体条款文档"""
+        article_ids = set()
+        all_nodes = subgraph.central_nodes + subgraph.connected_nodes
         for node in all_nodes:
-            labels = node.get("labels", [])
-            # node_id 可能存储在不同字段
-            nid = (node.get("node_id")
-                   or node.get("nodeId")
-                   or node.get("properties", {}).get("node_id"))
-            is_article = ("Article" in labels
-                          or node.get("node_id", "").startswith("art_"))
-            if nid and is_article and nid not in seen:
-                seen.add(nid)
-                article_ids.append(nid)
-            elif nid and nid not in seen:
-                seen.add(nid)
+            nid = node.get("node_id") or node.get("nodeId")
+            if not nid and "properties" in node:
+                nid = node["properties"].get("node_id") or node["properties"].get("nodeId")
+            
+            if nid and nid.startswith("art_"):
+                article_ids.add(nid)
+        return self._fetch_article_content(list(article_ids))
 
-        if not article_ids and seen:
-            logger.info(f"子图未直接包含 Article 节点，尝试根据 {len(seen)} 个关联节点回查条款")
-            try:
-                with self.driver.session() as session:
-                    res = session.run("""
-                        UNWIND $nids AS nid
-                        MATCH (n {node_id: nid})
-                        MATCH (n)-[*]-(a:Article)
-                        RETURN DISTINCT a.node_id AS art_id LIMIT 5
-                    """, {"nids": list(seen)})
-                    article_ids = [r["art_id"] for r in res]
-            except Exception as e:
-                logger.error(f"拓展查找相连 Article 失败: {e}")
-
-        if article_ids:
-            logger.info(f"子图中找到/关联了 {len(article_ids)} 个 Article 节点，回查完整内容")
-            return self._fetch_article_content(article_ids)
-
-        # 降级：返回子图摘要描述（原父类行为）
-        logger.warning("子图及其周边均未找到 Article 节点，返回摘要描述")
-        return super()._subgraph_to_documents(subgraph, reasoning_chains, query)
+    def close(self):
+        if self.driver: self.driver.close()

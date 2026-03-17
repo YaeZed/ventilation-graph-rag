@@ -43,9 +43,8 @@ from ventilation_data_preparation import VentilationDataPreparationModule
 from ventilation_generation import VentilationGenerationModule
 from ventilation_hybrid_retrieval import VentilationHybridRetrieval
 from ventilation_graph_rag_retrieval import VentilationGraphRAGRetrieval
-# from rag_modules.milvus_index_construction import MilvusIndexConstructionModule
 from ventilation_milvus_index_construction import VentilationMilvusIndexConstruction
-from rag_modules.intelligent_query_router import IntelligentQueryRouter
+from ventilation_query_router import VentilationQueryRouter
 
 # ══════════════════════════════════════════════════════════════
 # 配置
@@ -161,11 +160,11 @@ class VentilationRAGPipeline:
 
         # ── 5. 智能路由
         logger.info("[5/5] 初始化智能查询路由器...")
-        self.router = IntelligentQueryRouter(
+        self.router = VentilationQueryRouter(
             traditional_retrieval=self.hybrid_ret,
             graph_rag_retrieval=self.graph_ret,
-            llm_client=llm_client,
             config=cfg,
+            llm_client=llm_client,
         )
 
         logger.info("✅ 所有模块初始化完成！")

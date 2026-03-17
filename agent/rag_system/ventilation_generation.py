@@ -1,68 +1,77 @@
 """
-矿井通风安全规程 - 答案生成模块
+矿井通风安全规程 - 答案生成模块（独立重构版）
 
-继承 GenerationIntegrationModule，将 system prompt 和专业角色
-替换为矿井通风安全专家。
+、负责接收检索到的 Document 列表，并调用 LLM 生成专业、准确的规程解答。
 """
 
-import sys
 import os
 import logging
-from typing import List
-
+import time
+from typing import List, Generator, Union
+from openai import OpenAI
 from langchain_core.documents import Document
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-from rag_modules.generation_integration import GenerationIntegrationModule
 
 logger = logging.getLogger(__name__)
 
-
-class VentilationGenerationModule(GenerationIntegrationModule):
-    """
-    通风安全规程答案生成模块
-    覆盖 generate_adaptive_answer / generate_adaptive_answer_stream
-    中的提示词，使用通风安全专家角色。
-    """
+class VentilationGenerationModule:
+    """通风安全规程答案生成模块 - 独立版"""
 
     SYSTEM_ROLE = "矿井通风安全专家"
 
+    def __init__(self, model_name: str = "qwen-plus", temperature: float = 0.1, max_tokens: int = 2048):
+        self.model_name = model_name
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        
+        api_key = os.getenv("DASHSCOPE_API_KEY")
+        if not api_key:
+            logger.warning("环境变量 DASHSCOPE_API_KEY 未设置，生成功能可能无法使用")
+        
+        # 初始化 OpenAI 兼容客户端
+        # 注意：此处假设用户使用的是 DashScope (Qwen) 兼容接口
+        self.client = OpenAI(
+            api_key=api_key or "sk-dummy",
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
+        )
+        logger.info(f"通风生成模块初始化成功，模型: {model_name}")
+
     def _build_prompt(self, question: str, documents: List[Document]) -> str:
-        """构建通风规程专用提示词"""
+        """构建通风安全规程专用 Prompt"""
         context_parts = []
         for doc in documents:
             content = doc.page_content.strip()
-            if not content:
-                continue
-            level = doc.metadata.get('retrieval_level', '')
-            prefix = f"[{level.upper()}] " if level else ""
-            context_parts.append(f"{prefix}{content}")
+            if not content: continue
+            
+            # 提取元数据：支持重构后的字段名
+            name = doc.metadata.get("article_name") or doc.metadata.get("name") or "未知条款"
+            level = doc.metadata.get("retrieval_level", "unknown").upper()
+            
+            context_parts.append(f"【参考条款：{name} | 检索方式：{level}】\n{content}")
 
         context = "\n\n---\n\n".join(context_parts)
 
-        return f"""你是一位专业的{self.SYSTEM_ROLE}，熟悉《煤矿安全规程》及相关通风安全标准。
-请严格依据以下检索到的规程内容回答用户的问题，不得凭空杜撰条款内容。
+        return f"""你是一位专业的{self.SYSTEM_ROLE}，熟悉《煤矿安全规程》及相关生产安全标准。
+请严格依据以下检索到的规程内容回答用户的问题，不得凭空杜撰条款。
 
-【检索到的规程内容】
+【参考规程内容】
 {context}
 
-【用户问题】
+【用户提问】
 {question}
 
 请按以下格式回答：
-1. **直接结论**：给出明确的是/否或数值结论
-2. **依据条款**：列出引用的具体条款编号和原文关键句
-3. **分析说明**：结合场景做必要说明
-4. **整改建议**（如涉及违规）：给出具体可操作的整改方向
+1. **核合性结论**：明确结论（合规/违规/数值限值）
+2. **规程依据**：列出引用的具体条款编号和原文关键句
+3. **专家解析**：结合现场实际做专业解释
+4. **管理建议**（如有）：给出预防或整改建议
 
-如果检索内容不足以回答问题，请明确说明"当前规程知识库中暂无相关条款"。
+如果检索内容不足以回答，请明确说明“当前知识库中暂无相关具体条款，建议查阅完整版《煤矿安全规程》”。
 
 回答："""
 
     def generate_adaptive_answer(self, question: str, documents: List[Document]) -> str:
-        """覆盖父类方法，使用通风规程专业提示词"""
+        """同步生成答案"""
         prompt = self._build_prompt(question, documents)
-
         try:
             response = self.client.chat.completions.create(
                 model=self.model_name,
@@ -72,17 +81,15 @@ class VentilationGenerationModule(GenerationIntegrationModule):
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
-            logger.error(f"答案生成失败: {e}")
-            return f"抱歉，生成回答时出现错误：{str(e)}"
+            logger.error(f"生成失败: {e}")
+            return f"抱歉，系统生成解答时出现故障：{str(e)}"
 
     def generate_adaptive_answer_stream(
         self, question: str, documents: List[Document], max_retries: int = 3
-    ):
-        """覆盖父类方法，使用通风规程专业提示词（流式）"""
-        import time
-
+    ) -> Generator[str, None, None]:
+        """流式生成答案（带断线重试机制）"""
         prompt = self._build_prompt(question, documents)
-
+        
         for attempt in range(max_retries):
             try:
                 response = self.client.chat.completions.create(
@@ -90,23 +97,17 @@ class VentilationGenerationModule(GenerationIntegrationModule):
                     messages=[{"role": "user", "content": prompt}],
                     temperature=self.temperature,
                     max_tokens=self.max_tokens,
-                    stream=True,
-                    timeout=60,
+                    stream=True
                 )
+                
                 for chunk in response:
-                    if chunk.choices[0].delta.content:
+                    if chunk.choices and chunk.choices[0].delta.content:
                         yield chunk.choices[0].delta.content
-                return
+                return # 成功完成
 
             except Exception as e:
-                logger.warning(f"流式生成第 {attempt+1} 次失败: {e}")
+                logger.warning(f"流式生成第 {attempt+1} 次尝试失败: {e}")
                 if attempt < max_retries - 1:
-                    wait = (attempt + 1) * 2
-                    print(f"⚠️ 连接中断，{wait}秒后重试...")
-                    time.sleep(wait)
+                    time.sleep((attempt + 1) * 2)
                 else:
-                    # 降级为非流式
-                    try:
-                        yield self.generate_adaptive_answer(question, documents)
-                    except Exception as fe:
-                        yield f"抱歉，生成回答时出现网络错误，请稍后重试。错误：{str(fe)}"
+                    yield f"\n[系统提示] 生成中断，请稍后重试。错误: {str(e)}"
