@@ -18,6 +18,7 @@ from ventilation_kg_builder import VentilationKGBuilder
 logger = logging.getLogger(__name__)
 def setup_logging():
     """配置logging（在程序入口调用一次）"""
+    os.makedirs('safety_output', exist_ok=True)  # 确保输出目录存在
     logging.basicConfig(
         # 打印info及以上的日志
         level=logging.INFO,

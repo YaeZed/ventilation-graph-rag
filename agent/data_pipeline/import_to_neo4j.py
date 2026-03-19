@@ -31,6 +31,7 @@ NODES_CSV        = "safety_output/nodes.csv"
 RELATIONSHIPS_CSV = "safety_output/relationships.csv"
 
 # Neo4j 连接信息（与 docker-compose.yml 保持一致）
+# 注意：docker-compose 将容器内的 7687 映射到了主机的 7688
 NEO4J_URI      = "bolt://localhost:7687"
 NEO4J_USER     = "neo4j"
 NEO4J_PASSWORD = "160722yaesakura"

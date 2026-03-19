@@ -30,7 +30,7 @@ class RetrievalResult:
     metadata: Dict[str, Any]
 
 class VentilationHybridRetrieval:
-    """通风安全规程混合检索模块 - 独立版"""
+    """通风安全规程混合检索模块"""
 
     def __init__(self, config, data_module, milvus_module, llm_client):
         self.config = config
@@ -96,7 +96,149 @@ class VentilationHybridRetrieval:
                 unique_docs.append(doc)
                 seen_content.add(doc.page_content)
         
+        # 4. 风速查询强制注入第一百五十七条（表6）
+        # 原因：第一百五十七条正文仅一句话，向量相似度低，但它是所有风速合规判断的核心依据
+        WIND_SPEED_TRIGGERS = ["风速", "允许速度", "最低风速", "最高风速", "合规", "违规"]
+        if any(kw in query for kw in WIND_SPEED_TRIGGERS):
+            already_has_157 = any(
+                "第一百五十七条" in (doc.metadata.get("article_name", "") + doc.page_content)
+                for doc in unique_docs
+            )
+            if not already_has_157:
+                injected = self._fetch_article_157()
+                if injected:
+                    unique_docs = injected + unique_docs
+                    logger.info("风速查询：已强制注入第一百五十七条（表6）到检索结果")
+
+        # 5. 递归增强：为所有命中的条款自动丰富表格和关联引用摘要
+        unique_docs = self._enrich_documents_with_recursive_context(unique_docs)
+        
         return unique_docs[:top_k * 2]
+
+    def _fetch_article_157(self) -> List[Document]:
+        """
+        专用方法：从 Neo4j 直查第一百五十七条（表6 井巷中的允许风流速度），
+        构建含完整参数表的 Document，用于风速查询时强制注入。
+        """
+        try:
+            with self.driver.session() as session:
+                cypher = """
+                MATCH (a:Article)
+                WHERE a.name = '第一百五十七条' OR a.node_id CONTAINS '157'
+                WITH a
+                OPTIONAL MATCH (a)-[:CONSTRAINS]->(p:Parameter)
+                OPTIONAL MATCH (p)-[:APPLIES_TO]->(l:Location)
+                RETURN a.node_id AS node_id, a.name AS name,
+                       a.content AS content, a.title AS title,
+                       collect(DISTINCT {name: p.name, min: p.value_min, max: p.value_max,
+                                         unit: p.unit, location: l.name}) AS params
+                LIMIT 1
+                """
+                res = session.run(cypher)
+                record = res.single()
+                if not record:
+                    return []
+
+                full_text = (
+                    f"【第一百五十七条】{record['title'] or ''}\n"
+                    f"{record['content'] or '井巷中的风流速度应当符合表6要求。'}"
+                )
+
+                params = [p for p in record["params"] if p.get("name")]
+                if params:
+                    table_md = "\n\n### [规程附件：技术参数对照表（表6 井巷中的允许风流速度）]\n| 参数名称 | 适用地点 | 最小值 | 最大值 | 单位 |\n| :--- | :--- | :--- | :--- | :--- |\n"
+                    for p in params:
+                        min_val = p['min'] if p['min'] is not None else "-"
+                        max_val = p['max'] if p['max'] is not None else "-"
+                        loc_val = p.get('location') or "-"
+                        table_md += f"| {p['name']} | {loc_val} | {min_val} | {max_val} | {p.get('unit') or '-'} |\n"
+                    full_text += table_md
+
+                return [Document(
+                    page_content=full_text,
+                    metadata={
+                        "node_id": record["node_id"],
+                        "article_name": "第一百五十七条",
+                        "retrieval_level": "mandatory_inject",
+                    }
+                )]
+        except Exception as e:
+            logger.error(f"强制注入第一百五十七条失败: {e}")
+            return []
+
+    def _enrich_documents_with_recursive_context(self, docs: List[Document]) -> List[Document]:
+        """
+        关键优化：为命中条款自动组合 Neo4j 中的 [参数表] 和 [1-hop 关联条款摘要]。
+
+        node_id 解析优先级（由高到低）：
+          1. metadata['parent_id']    —— chunk 文档的父条款 ID (art_xxx)
+          2. metadata['article_name'] —— 条款中文名（第一百xx条）
+          3. metadata['node_id']      —— 直接条款节点 ID
+        """
+        enriched_docs = []
+        for doc in docs:
+            # ── 幂等检查：已增强过的文档跳过 ──────────────────
+            if "[规程附件：技术参数对照表]" in doc.page_content:
+                enriched_docs.append(doc)
+                continue
+
+            # ── 定位 Neo4j 中对应的 Article 节点 ID ──────────
+            meta = doc.metadata
+            lookup_id = (
+                meta.get("parent_id")       # chunk 的父条款 art_xxx
+                or meta.get("article_name") # 中文条款名如"第一百五十七条"
+                or meta.get("node_id")      # 直接使用 node_id
+            )
+            if not lookup_id:
+                enriched_docs.append(doc)
+                continue
+
+            try:
+                with self.driver.session() as session:
+                    cypher = """
+                    MATCH (a:Article)
+                    WHERE a.node_id = $nid OR a.name = $nid
+                    WITH a
+                    OPTIONAL MATCH (a)-[:CONSTRAINS]->(p:Parameter)
+                    OPTIONAL MATCH (p)-[:APPLIES_TO]->(l:Location)
+                    OPTIONAL MATCH (a)-[:RELATED_TO|REFERENCES]-(ref:Article)
+                    RETURN a.node_id AS node_id, a.name AS name,
+                           collect(DISTINCT {name: p.name, min: p.value_min, max: p.value_max,
+                                            unit: p.unit, location: l.name}) AS params,
+                           collect(DISTINCT {name: ref.name, content: ref.content}) AS related_docs
+                    """
+                    res = session.run(cypher, {"nid": lookup_id})
+                    record = res.single()
+                    if record:
+                        full_text = doc.page_content
+
+                        # A. 附加技术参数对照表（含适用地点列）
+                        params = [p for p in record["params"] if p.get("name")]
+                        if params:
+                            table_md = "\n\n### [规程附件：技术参数对照表]\n| 参数名称 | 适用地点 | 最小值 | 最大值 | 单位 |\n| :--- | :--- | :--- | :--- | :--- |\n"
+                            for p in params:
+                                min_val = p['min'] if p['min'] is not None else "-"
+                                max_val = p['max'] if p['max'] is not None else "-"
+                                loc_val = p.get('location') or "-"
+                                table_md += f"| {p['name']} | {loc_val} | {min_val} | {max_val} | {p.get('unit') or '-'} |\n"
+                            full_text += table_md
+
+                        # B. 附加关联引用条款摘要（防止 content 为 None）
+                        related = [r for r in record["related_docs"] if r.get("name")]
+                        if related:
+                            ref_section = "\n\n### [关联引用条款摘要]\n"
+                            for r in related:
+                                c = r.get('content') or ''
+                                summary = c[:200] + "..." if len(c) > 200 else c
+                                ref_section += f"- **{r['name']}**: {summary}\n"
+                            full_text += ref_section
+
+                        doc.page_content = full_text
+                        logger.info(f"已为混合检索命中的条款 {lookup_id} 执行递归语境增强")
+            except Exception as e:
+                logger.error(f"混合检索递归增强失败 ({lookup_id}): {e}")
+            enriched_docs.append(doc)
+        return enriched_docs
 
     def vector_search_enhanced(self, query: str, top_k: int = 5) -> List[Document]:
         """向量检索并补全通风邻居信息"""

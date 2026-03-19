@@ -55,7 +55,7 @@ class KnowledgeSubgraph:
 
 class VentilationGraphRAGRetrieval:
     """
-    通风安全规程图 RAG 检索系统 - 独立版
+    通风安全规程图 RAG 检索系统 
     核心能力：
     1. 通风规程意图理解：识别规程条款、设施、参数间的关联意图
     2. 多跳规程链条追踪：解决“A故障导致B要求生效”这类逻辑链
@@ -237,7 +237,10 @@ class VentilationGraphRAGRetrieval:
         return paths
 
     def _extract_subgraph(self, graph_query: GraphQuery) -> KnowledgeSubgraph:
-        """子图提取逻辑"""
+        """子图提取逻辑（支持多实体合并）"""
+        central_nodes = []
+        connected_nodes = []
+        relationships = []
         try:
             with self.driver.session() as session:
                 cypher = f"""
@@ -247,56 +250,74 @@ class VentilationGraphRAGRetrieval:
                 RETURN s, collect(DISTINCT n) AS neighbors, collect(DISTINCT r) AS rels
                 """
                 result = session.run(cypher, {"source_entities": graph_query.source_entities})
-                record = result.single()
-                if record:
-                    return KnowledgeSubgraph(
-                        central_nodes=[dict(record["s"])],
-                        connected_nodes=[dict(n) for n in record["neighbors"]],
-                        relationships=[dict(r) for r in record["rels"]],
-                        graph_metrics={},
-                        reasoning_chains=[]
-                    )
+                # 遍历所有记录（支持多个匹配实体），而非只取第一条
+                for record in result:
+                    central_nodes.append(dict(record["s"]))
+                    connected_nodes.extend([dict(n) for n in record["neighbors"]])
+                    relationships.extend([dict(r) for r in record["rels"]])
         except Exception as e:
             logger.error(f"子图提取解析失败: {e}")
-        return KnowledgeSubgraph([], [], [], {}, [])
+        return KnowledgeSubgraph(central_nodes, connected_nodes, relationships, {}, [])
 
     def _fetch_article_content(self, node_ids: list, max_articles: int = 5) -> list:
-        """从 Neo4j 回查通风规程条款完整详情"""
+        """从 Neo4j 批量回查条款详情，并执行 1-hop 递归增强（表格 + 关联条款）"""
         if not node_ids: return []
         docs = []
         try:
             with self.driver.session() as session:
-                # 强化查询逻辑：同时尝试精确 ID 匹配和名称模糊匹配
+                # 强化查询：主条款 + 结构化参数 + 关联条款摘要
                 cypher = """
                 UNWIND $ids AS nid
                 MATCH (a:Article) 
-                WHERE a.node_id = nid OR a.node_id CONTAINS nid OR nid CONTAINS a.node_id OR a.name CONTAINS nid
+                WHERE a.node_id = nid OR a.name = nid OR a.name CONTAINS nid
                 WITH DISTINCT a
                 OPTIONAL MATCH (a)-[:CONSTRAINS]->(p:Parameter)
-                OPTIONAL MATCH (a)-[:SPECIFIES]->(req:Requirement)
+                OPTIONAL MATCH (p)-[:APPLIES_TO]->(l:Location)
+                OPTIONAL MATCH (a)-[:RELATED_TO|REFERENCES]-(ref:Article)
                 RETURN a.node_id AS node_id, a.name AS name, a.title AS title, a.content AS content,
-                       collect(DISTINCT p) AS params, collect(DISTINCT req) AS reqs
+                       collect(DISTINCT {name: p.name, min: p.value_min, max: p.value_max,
+                                         unit: p.unit, location: l.name}) AS params,
+                       collect(DISTINCT {name: ref.name, content: ref.content}) AS related_docs
                 LIMIT $limit
                 """
                 res = session.run(cypher, {"ids": list(node_ids), "limit": max_articles})
                 for record in res:
-                    text = f"# {record['name']}\n{record['title']}\n\n{record['content']}"
-                    # 附加数值和要求
-                    if record["params"]:
-                        text += "\n\n【数值指标】\n" + "\n".join([f"- {p['name']}: {p.get('value_min','')}~{p.get('value_max','')}" for p in record["params"]])
-                    if record["reqs"]:
-                        text += "\n\n【安全要求】\n" + "\n".join([f"- {r['name']}: {r.get('content','')[:100]}" for r in record["reqs"]])
+                    main_content = record["content"]
+                    if not main_content: continue
+                    
+                    full_text = f"【定位条款：{record['name']}】\n# {record['title']}\n\n{main_content}"
+                    
+                    # 1. 动态重组参数表格（含适用地点列）
+                    params = [p for p in record["params"] if p.get("name")]
+                    if params:
+                        table_md = "\n\n### [规程附件：技术参数对照表]\n| 参数名称 | 适用地点 | 最小值 | 最大值 | 单位 |\n| :--- | :--- | :--- | :--- | :--- |\n"
+                        for p in params:
+                            min_val = p['min'] if p['min'] is not None else "-"
+                            max_val = p['max'] if p['max'] is not None else "-"
+                            loc_val = p.get('location') or "-"
+                            table_md += f"| {p['name']} | {loc_val} | {min_val} | {max_val} | {p.get('unit') or '-'} |\n"
+                        full_text += table_md
+                    
+                    # 2. 递归组合 1-hop 关联条款摘要
+                    related = [r for r in record["related_docs"] if r.get("name")]
+                    if related:
+                        ref_section = "\n\n### [关联引用条款参考]\n"
+                        for r in related:
+                            c = r.get('content') or ''
+                            summary = c[:200] + "..." if len(c) > 200 else c
+                            ref_section += f"- **{r['name']}**: {summary}\n"
+                        full_text += ref_section
                     
                     docs.append(Document(
-                        page_content=text,
+                        page_content=full_text,
                         metadata={
                             "node_id": record["node_id"],
                             "article_name": record["name"],
-                            "search_type": "graph_rag"
+                            "retrieval_level": "graph_rag_enriched"
                         }
                     ))
         except Exception as e:
-            logger.error(f"回查条款失败: {e}")
+            logger.error(f"递归回查条款失败: {e}")
         return docs
 
     def _paths_to_documents(self, paths: List[GraphPath]) -> List[Document]:

@@ -1,7 +1,7 @@
 """
-矿井通风安全规程 - 答案生成模块（独立重构版）
+矿井通风安全规程 - 答案生成模块
 
-、负责接收检索到的 Document 列表，并调用 LLM 生成专业、准确的规程解答。
+负责接收检索到的 Document 列表，并调用 LLM 生成专业、准确的规程解答。
 """
 
 import os
@@ -14,7 +14,7 @@ from langchain_core.documents import Document
 logger = logging.getLogger(__name__)
 
 class VentilationGenerationModule:
-    """通风安全规程答案生成模块 - 独立版"""
+    """通风安全规程答案生成模块"""
 
     SYSTEM_ROLE = "矿井通风安全专家"
 
@@ -22,11 +22,11 @@ class VentilationGenerationModule:
         self.model_name = model_name
         self.temperature = temperature
         self.max_tokens = max_tokens
-        
+
         api_key = os.getenv("DASHSCOPE_API_KEY")
         if not api_key:
             logger.warning("环境变量 DASHSCOPE_API_KEY 未设置，生成功能可能无法使用")
-        
+
         # 初始化 OpenAI 兼容客户端
         # 注意：此处假设用户使用的是 DashScope (Qwen) 兼容接口
         self.client = OpenAI(
@@ -40,18 +40,25 @@ class VentilationGenerationModule:
         context_parts = []
         for doc in documents:
             content = doc.page_content.strip()
-            if not content: continue
-            
+            if not content:
+                continue
+
             # 提取元数据：支持重构后的字段名
             name = doc.metadata.get("article_name") or doc.metadata.get("name") or "未知条款"
             level = doc.metadata.get("retrieval_level", "unknown").upper()
-            
+
             context_parts.append(f"【参考条款：{name} | 检索方式：{level}】\n{content}")
 
         context = "\n\n---\n\n".join(context_parts)
 
         return f"""你是一位专业的{self.SYSTEM_ROLE}，熟悉《煤矿安全规程》及相关生产安全标准。
-请严格依据以下检索到的规程内容回答用户的问题，不得凭空杜撰条款。
+
+【严格约束】
+1. 只能依据下方【参考规程内容】回答，不得凭空引用未在检索内容中出现的条款或数值。
+2. 如果检索内容中有【规程附件：技术参数对照表】，则答案所引用的一切数值必须直接出自该表，
+   严禁使用"虽未在检索内容中完整呈现"、"推测"、"据规程记忆"等推断性措辞。
+3. 若检索结果确实不含某具体数值，请明确说明"当前检索结果未包含该参数，建议查阅完整版《煤矿安全规程》"，
+   不得自行推断或补充数据。
 
 【参考规程内容】
 {context}
@@ -61,11 +68,9 @@ class VentilationGenerationModule:
 
 请按以下格式回答：
 1. **核合性结论**：明确结论（合规/违规/数值限值）
-2. **规程依据**：列出引用的具体条款编号和原文关键句
+2. **规程依据**：列出引用的具体条款编号和原文关键句（数值必须标注来源）
 3. **专家解析**：结合现场实际做专业解释
 4. **管理建议**（如有）：给出预防或整改建议
-
-如果检索内容不足以回答，请明确说明“当前知识库中暂无相关具体条款，建议查阅完整版《煤矿安全规程》”。
 
 回答："""
 
@@ -89,7 +94,7 @@ class VentilationGenerationModule:
     ) -> Generator[str, None, None]:
         """流式生成答案（带断线重试机制）"""
         prompt = self._build_prompt(question, documents)
-        
+
         for attempt in range(max_retries):
             try:
                 response = self.client.chat.completions.create(
@@ -99,11 +104,11 @@ class VentilationGenerationModule:
                     max_tokens=self.max_tokens,
                     stream=True
                 )
-                
+
                 for chunk in response:
                     if chunk.choices and chunk.choices[0].delta.content:
                         yield chunk.choices[0].delta.content
-                return # 成功完成
+                return  # 成功完成
 
             except Exception as e:
                 logger.warning(f"流式生成第 {attempt+1} 次尝试失败: {e}")

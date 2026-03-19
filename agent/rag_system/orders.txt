@@ -1,0 +1,4 @@
+activate graph-rag
+cd agent/rag_system
+python ventilation_test_queries.py
+python ventilation_rag_pipeline.py

@@ -3,7 +3,7 @@
 
 整合以下模块：
     1. VentilationDataPreparationModule  - 从 Neo4j 读取规程数据
-    2. MilvusIndexConstructionModule     - 向量索引（通风规程版）
+    2. MilvusIndexConstructionModule     - 向量索引
     3. HybridRetrievalModule             - 混合检索
     4. GraphRAGRetrieval                 - 图 RAG 检索
     5. IntelligentQueryRouter            - 智能路由

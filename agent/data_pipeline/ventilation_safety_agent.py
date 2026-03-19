@@ -63,9 +63,13 @@ class VentilationSafetyAgent:
 你的任务是将非结构化的规程条文转化为计算机可理解的逻辑知识库。
 
 ### 核心解析规则：
-1. **识别表格**：识别 Markdown 表格并提取数值。
-2. **提取实体**：提取指标、要求及物理设施。
-3. **逻辑分类**：区分数值约束、设施配置及禁止行为。
+1. **识别表格**：条文中如果有 Markdown 表格（如表6、表7等），必须逐行提取，**每一行对应一个独立的 metric 条目**。
+2. **location 字段必填**：
+   - 表格行的 location 必须填写该行"适用地点"或"巷道/工作面类型"列的具体内容，例如"采煤工作面""掘进中的岩巷""主要进、回风巷"等。
+   - 非表格参数如有明确的适用场景，也须提取并填入 location，不得为空字符串。
+   - 若整条条款没有区分地点，location 填"通用"。
+3. **提取实体**：提取数值指标、逻辑要求及物理设施。
+4. **逻辑分类**：区分数值约束、设施配置及禁止行为。
 
 ### 必须返回的标准 JSON 格式（严格按此结构）：
 {
@@ -77,7 +81,7 @@ class VentilationSafetyAgent:
             "threshold_min": 最小数值或null,
             "threshold_max": 最大数值或null,
             "unit": "单位（如：m/s）",
-            "location": "适用地点（如：采煤工作面）"
+            "location": "适用地点，必填（如：掘进中的岩巷）"
         }
     ],
     "requirements": [
@@ -87,7 +91,14 @@ class VentilationSafetyAgent:
             "associated_facilities": ["相关设施名称"]
         }
     ]
-}"""
+}
+
+### 示例（第一百五十七条 表6 的正确处理方式）：
+表6 每一行巷道类型对应一个 metric，location 填写该行巷道名称：
+- 采煤工作面 → location: "采煤工作面"，最低风速 0.25，最高风速 4.0，单位 m/s
+- 掘进中的岩巷 → location: "掘进中的岩巷"，最低风速 0.15，最高风速 4.0，单位 m/s
+- 主要进、回风巷 → location: "主要进、回风巷"，最低风速 0.25，单位 m/s
+不得将整张表格压缩成一个 metric，必须==逐行拆分==。"""
 
     def extract_logic(self, content: str) -> Optional[RegulationArticle]:
         """

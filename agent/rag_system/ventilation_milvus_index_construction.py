@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 class VentilationMilvusIndexConstruction:
-    """矿井通风安全规程专属 Milvus 索引构建模块"""
+    """矿井通风安全规程 Milvus 索引构建模块"""
 
     def __init__(self, 
                  host: str = "localhost", 

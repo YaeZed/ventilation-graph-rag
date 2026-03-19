@@ -21,7 +21,7 @@ class RetrievalStrategy(Enum):
 
 class VentilationQueryRouter:
     """
-    通风安全规程智能路由模块 - 独立版
+    通风安全规程智能路由模块 
     核心功能：
     1. 意图特征分析：识别问题是否涉及复杂规程链条
     2. 检索策略推荐与执行：根据分析分发到对应的独立检索模块
