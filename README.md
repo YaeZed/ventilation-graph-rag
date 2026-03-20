@@ -45,7 +45,7 @@ docker-compose up -d
 ```
 
 _启动后：_
-_- Neo4j 可访问 `http://localhost:7475`，默认用户名/密码在代码中配置为 `neo4j` / `160722yaesakura`。_
+_- Neo4j 可访问 `http://localhost:7474`，默认用户名/密码为 `neo4j` / `160722yaesakura`。_
 _- Milvus 将在后台运行并开放 `19530` 供代码连接。_
 
 ### 3. 配置环境变量
@@ -63,10 +63,11 @@ DASHSCOPE_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxx
 ```bash
 cd agent/data_pipeline
 
-# 该脚本将调用大模型抽取实体与逻辑，把非结构化的条款变成图节点和关系
+# 1. 抽取知识并生成 CSV (调用大模型)
 python run_ventilation_agent.py
 
-# 请根据你的业务逻辑和导入脚本，确保所有节点成功导入 Neo4j 数据库。
+# 2. 将 CSV 数据导入 Neo4j (执行此步前请确保 Neo4j 容器已运行)
+python import_to_neo4j.py
 ```
 
 ### 5. 向量索引构建与 RAG 系统启动
