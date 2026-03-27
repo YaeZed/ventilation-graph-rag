@@ -28,7 +28,7 @@ class VentilationGenerationModule:
             logger.warning("环境变量 DASHSCOPE_API_KEY 未设置，生成功能可能无法使用")
 
         # 初始化 OpenAI 兼容客户端
-        # 注意：此处假设用户使用的是 DashScope (Qwen) 兼容接口
+        # 注意：此处使用的是 DashScope (Qwen) 兼容接口
         self.client = OpenAI(
             api_key=api_key or "sk-dummy",
             base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"

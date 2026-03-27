@@ -10,11 +10,8 @@ import os
 import logging
 from typing import List, Dict, Any
 from dataclasses import dataclass
-
 from neo4j import GraphDatabase
 from langchain_core.documents import Document
-
-
 
 logger = logging.getLogger(__name__)
 
@@ -30,16 +27,12 @@ class GraphNode:
 class VentilationDataPreparationModule:
     """
     通风安全规程数据准备模块
-    覆盖以下方法：
-        load_graph_data()         → 加载 Article / Parameter / Requirement / Facility / Location
-        build_article_documents() → 构建条款文档（一条款一文档）
-        get_statistics()          → 统计信息
+    load_graph_data()         → 加载 Article / Parameter / Requirement / Facility / Location
+    build_article_documents() → 构建条款文档（一条款一文档）
+    get_statistics()          → 统计信息
     """
 
     def __init__(self, uri: str, user: str, password: str, database: str = "neo4j"):
-        # 复用父类连接逻辑，但修改为通风领域的字段名
-        # super().__init__(uri, user, password, database)
-       
         """
         初始化图数据库连接
         
@@ -55,7 +48,7 @@ class VentilationDataPreparationModule:
         self.database = database
         self.driver = None
 
-        # 通风领域专用数据容器
+        # 通风领域数据容器
         self.articles: List[GraphNode]    = []  # 存放所有"条款"节点
         self.parameters: List[GraphNode]  = []  # 存放所有"安全指标"节点
         self.requirements: List[GraphNode] = [] # 存放所有"安全要求"节点
@@ -63,15 +56,14 @@ class VentilationDataPreparationModule:
         self.locations: List[GraphNode]   = []  # 存放所有"适用地点"节点
 
 
-        # 兼容性存根：让 hybrid_retrieval._build_graph_index() 不报 AttributeError
-        # （父类 cooking 版本用这几个字段，通风版本里直接清空即可）
-        self.recipes        = []
-        self.ingredients    = []
-        self.cooking_steps  = []
+        # # 兼容性存根：让 hybrid_retrieval._build_graph_index() 不报 AttributeError
+        # # （父类 cooking 版本用这几个字段，通风版本里直接清空即可）
+        # self.recipes        = []
+        # self.ingredients    = []
+        # self.cooking_steps  = []
 
         self.documents: List[Document] = []
         self.chunks: List[Document] = []
-
 
         self._connect()
         
@@ -115,7 +107,7 @@ class VentilationDataPreparationModule:
                 MATCH (a:Article)
                 RETURN a.node_id AS node_id, labels(a) AS labels,
                        a.name AS name, properties(a) AS props
-                ORDER BY a.node_id
+                ORDER BY a.node_name
             """)
             self.articles = [
                 GraphNode(
@@ -415,7 +407,7 @@ class VentilationDataPreparationModule:
         logger.info(f"文档分块完成，共生成 {len(chunks)} 个块")
         return chunks
     # ──────────────────────────────────────────────────────────
-    # 3. 统计信息（覆盖父类，使用通风领域字段）
+    # 3. 统计信息
     # ──────────────────────────────────────────────────────────
     def get_statistics(self) -> Dict[str, Any]:
         stats = {

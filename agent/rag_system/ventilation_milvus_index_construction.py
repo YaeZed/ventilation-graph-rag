@@ -57,8 +57,7 @@ class VentilationMilvusIndexConstruction:
 
     def _create_collection_schema(self) -> CollectionSchema:
         """
-        创建专属于通风规程的集合模式
-        去掉了烹饪相关字段，增加了 article_title, param_count, req_count
+        创建通风规程的集合模式
         """
         fields = [
             # 基础标识符

@@ -241,9 +241,9 @@ class VentilationHybridRetrieval:
         return enriched_docs
 
     def vector_search_enhanced(self, query: str, top_k: int = 5) -> List[Document]:
-        """向量检索并补全通风邻居信息"""
+        """向量检索并补全邻居信息"""
         try:
-            # 使用重构后的 Milvus 模块执行相似度搜索
+            # 使用 Milvus 模块执行相似度搜索
             vector_res = self.milvus_module.similarity_search(query, k=top_k*2)
             docs = []
             for res in vector_res:

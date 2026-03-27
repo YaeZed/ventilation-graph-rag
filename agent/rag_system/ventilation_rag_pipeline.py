@@ -106,7 +106,7 @@ class VentilationRAGPipeline:
 
         cfg = self.cfg
 
-        # ── 1. LLM 客户端（生成模块先初始化，路由也需要它）
+        # ── 1. 初始化LLM 客户端
         logger.info("[1/5] 初始化 LLM 生成模块...")
         self.generator = VentilationGenerationModule(
             model_name=cfg.llm_model,
@@ -147,7 +147,7 @@ class VentilationRAGPipeline:
             logger.info("  向量索引已存在，直接加载")
             self.milvus_module.load_collection()
 
-        # ── 4. 检索模块（通风规程优化版）
+        # ── 4. 检索模块
         logger.info("[4/5] 初始化检索模块...")
         self.hybrid_ret = VentilationHybridRetrieval(
             config=cfg, milvus_module=self.milvus_module,
