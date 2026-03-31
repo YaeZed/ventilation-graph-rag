@@ -199,7 +199,7 @@ class VentilationGraphRAGRetrieval:
                 UNWIND $source_entities AS sname
                 MATCH (s) WHERE s.name CONTAINS sname OR s.node_id = sname
                 MATCH p = (s)-[*0..{depth}]-(t)
-                WHERE (t:Article OR labels(t)[0] = 'Article' OR t.node_id STARTS WITH 'art_')
+                WHERE (t:Article OR labels(t)[0] = 'Article' OR toLower(t.node_id) STARTS WITH 'art_')
                 WITH p, length(p) AS len, nodes(p) AS ns, relationships(p) AS rs
                 ORDER BY len ASC
                 LIMIT 20
@@ -292,8 +292,8 @@ class VentilationGraphRAGRetrieval:
                     if params:
                         table_md = "\n\n### [规程附件：技术参数对照表]\n| 参数名称 | 适用地点 | 最小值 | 最大值 | 单位 |\n| :--- | :--- | :--- | :--- | :--- |\n"
                         for p in params:
-                            min_val = p['min'] if p['min'] is not None else "-"
-                            max_val = p['max'] if p['max'] is not None else "-"
+                            min_val = p.get('min') if p.get('min') is not None else "-"
+                            max_val = p.get('max') if p.get('max') is not None else "-"
                             loc_val = p.get('location') or "-"
                             table_md += f"| {p['name']} | {loc_val} | {min_val} | {max_val} | {p.get('unit') or '-'} |\n"
                         full_text += table_md
@@ -339,7 +339,7 @@ class VentilationGraphRAGRetrieval:
                 labels = node.get("labels", [])
                 if not labels and "labels" in node: labels = node["labels"]
                 
-                if "Article" in labels or nid.startswith("art_"):
+                if "Article" in labels or nid.lower().startswith("art_"):
                     article_ids.add(nid)
                 elif "_" in nid and ("PAR_" in nid or "FAC_" in nid or "REQ_" in nid):
                     # 尝试从 PAR_第一百八十条-xxx 中提取出“第一百八十条”作为回查线索
@@ -348,9 +348,9 @@ class VentilationGraphRAGRetrieval:
                         parts = nid.split('_')
                         if len(parts) >= 2:
                             term = parts[1].split('-')[0]
-                            # 我们需要将这个 term 转回真正的 node_id (art_xxx)
+                            # 我们需要将这个 term 转回真正的 node_id (ART_xxx)
                             # 最稳妥的方法是利用它去查一次
-                            article_ids.add(f"art_{term}")
+                            article_ids.add(f"ART_{term}")
                     except: pass
         
         if not article_ids:
@@ -369,7 +369,7 @@ class VentilationGraphRAGRetrieval:
             if not nid and "properties" in node:
                 nid = node["properties"].get("node_id") or node["properties"].get("nodeId")
             
-            if nid and nid.startswith("art_"):
+            if nid and nid.lower().startswith("art_"):
                 article_ids.add(nid)
         return self._fetch_article_content(list(article_ids))
 
