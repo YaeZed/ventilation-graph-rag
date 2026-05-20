@@ -60,7 +60,7 @@ class VentilationConfig:
     milvus_port      = 19530
     collection_name  = "ventilation_safety"
     vector_dimension = 512
-    embedding_model  = "BAAI/bge-small-zh-v1.5"
+    embedding_model  = os.path.join(BASE_DIR, "..", "..", "models", "bge-small-zh-v1.5")
 
     # LLM (lowercase to match extract_query_keywords / understand_graph_query)
     llm_model   = "qwen-plus"

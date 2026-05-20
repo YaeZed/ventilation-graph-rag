@@ -254,7 +254,11 @@ class VentilationGraphRAGRetrieval:
                 for record in result:
                     central_nodes.append(dict(record["s"]))
                     connected_nodes.extend([dict(n) for n in record["neighbors"]])
-                    relationships.extend([dict(r) for r in record["rels"]])
+                    for rel_group in record["rels"]:
+                        if isinstance(rel_group, list):
+                            relationships.extend(dict(r) for r in rel_group)
+                        else:
+                            relationships.append(dict(rel_group))
         except Exception as e:
             logger.error(f"子图提取解析失败: {e}")
         return KnowledgeSubgraph(central_nodes, connected_nodes, relationships, {}, [])

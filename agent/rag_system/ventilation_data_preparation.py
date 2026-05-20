@@ -107,7 +107,7 @@ class VentilationDataPreparationModule:
                 MATCH (a:Article)
                 RETURN a.node_id AS node_id, labels(a) AS labels,
                        a.name AS name, properties(a) AS props
-                ORDER BY a.node_name
+                ORDER BY a.node_id
             """)
             self.articles = [
                 GraphNode(

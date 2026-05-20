@@ -40,7 +40,7 @@ class VentilationMilvusIndexConstruction:
         """初始化Milvus客户端"""
         try:
             self.client = MilvusClient(uri=f"http://{self.host}:{self.port}")
-            logger.info(f"已连接到Milvus服务器: {self.host}:{self.port}")
+            logger.info(f"已连接到Milvus服务端: {self.host}:{self.port}")
         except Exception as e:
             logger.error(f"连接Milvus失败: {e}")
             raise
