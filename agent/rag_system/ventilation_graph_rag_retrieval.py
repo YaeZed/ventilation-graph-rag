@@ -7,6 +7,7 @@
 
 import json
 import logging
+import os
 from enum import Enum
 from dataclasses import dataclass
 from collections import defaultdict, deque
@@ -62,17 +63,22 @@ class VentilationGraphRAGRetrieval:
     3. 结构化子图提取：获取针对某一地点或设施的完整安全知识网络
     """
     
-    def __init__(self, config, llm_client):
+    def __init__(self, config, llm_client, neo4j_driver=None):
         self.config = config
         self.llm_client = llm_client
-        self.driver = None
+        self.driver = neo4j_driver
+        self._owns_driver = neo4j_driver is None
+        self.neo4j_database = getattr(config, "neo4j_database", os.getenv("NEO4J_DATABASE", "neo4j"))
         
         # 缓存系统
         self.entity_cache = {}
         self.relation_cache = {}
         
         # 连接准备
-        self._init_connection()
+        if self._owns_driver:
+            self._init_connection()
+        else:
+            logger.info("图 RAG 检索模块复用外部 Neo4j driver")
 
     def _init_connection(self):
         """初始化 Neo4j 连接"""
@@ -94,7 +100,7 @@ class VentilationGraphRAGRetrieval:
         """构建通风领域节点索引"""
         logger.info("构建通风规程图结构索引...")
         try:
-            with self.driver.session() as session:
+            with self.driver.session(database=self.neo4j_database) as session:
                 # 使用通用的 node_id 属性
                 entity_query = """
                 MATCH (n)
@@ -192,7 +198,7 @@ class VentilationGraphRAGRetrieval:
         """多跳图遍历核心逻辑"""
         paths = []
         try:
-            with self.driver.session() as session:
+            with self.driver.session(database=self.neo4j_database) as session:
                 depth = graph_query.max_depth
                 # 模糊匹配节点名，并向外拓展找寻 Article 节点
                 cypher = f"""
@@ -242,7 +248,7 @@ class VentilationGraphRAGRetrieval:
         connected_nodes = []
         relationships = []
         try:
-            with self.driver.session() as session:
+            with self.driver.session(database=self.neo4j_database) as session:
                 cypher = f"""
                 UNWIND $source_entities AS sname
                 MATCH (s) WHERE s.name CONTAINS sname OR s.node_id = sname
@@ -268,7 +274,7 @@ class VentilationGraphRAGRetrieval:
         if not node_ids: return []
         docs = []
         try:
-            with self.driver.session() as session:
+            with self.driver.session(database=self.neo4j_database) as session:
                 # 强化查询：主条款 + 结构化参数 + 关联条款摘要
                 cypher = """
                 UNWIND $ids AS nid
@@ -378,4 +384,6 @@ class VentilationGraphRAGRetrieval:
         return self._fetch_article_content(list(article_ids))
 
     def close(self):
-        if self.driver: self.driver.close()
+        if self._owns_driver and self.driver:
+            self.driver.close()
+            self.driver = None

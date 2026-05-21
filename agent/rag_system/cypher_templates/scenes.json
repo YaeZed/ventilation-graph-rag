@@ -1,0 +1,73 @@
+{
+  "version": "1.0",
+  "description": "Structured Cypher templates for ventilation hazard recognition. These scene schemas are designed for Qwen-VL structured output and deterministic Neo4j matching.",
+  "scenes": [
+    {
+      "id": "airflow_speed",
+      "name": "井巷风速合规",
+      "query_file": "airflow_speed.cypher",
+      "aliases": ["风速", "巷道风速", "井巷风速", "工作面风速", "airflow_speed", "wind_speed"],
+      "keywords": ["风速", "最低风速", "最高风速", "井巷", "巷道", "工作面", "m/s"],
+      "schema": {
+        "location": {"type": "string", "required": true, "description": "井巷或工作面类型，如掘进中的岩巷、采煤工作面、风桥"},
+        "airflow_speed": {"type": "number", "required": false, "unit": "m/s", "description": "现场实测风速"},
+        "facility_type": {"type": "string", "required": false, "description": "相关设施，如风门、梯子间、架线电机车巷道"},
+        "description": {"type": "string", "required": false}
+      }
+    },
+    {
+      "id": "air_quality",
+      "name": "空气成分与有害气体",
+      "query_file": "air_quality.cypher",
+      "aliases": ["空气成分", "有害气体", "瓦斯浓度", "甲烷浓度", "氧气浓度", "二氧化碳浓度", "air_quality", "gas_concentration"],
+      "keywords": ["氧气", "二氧化碳", "甲烷", "瓦斯", "一氧化碳", "硫化氢", "氨", "浓度", "%"],
+      "schema": {
+        "location": {"type": "string", "required": false, "description": "检测地点，如采掘工作面、回风巷、停风区"},
+        "oxygen_concentration": {"type": "number", "required": false, "unit": "%"},
+        "carbon_dioxide_concentration": {"type": "number", "required": false, "unit": "%"},
+        "methane_concentration": {"type": "number", "required": false, "unit": "%"},
+        "carbon_monoxide_concentration": {"type": "number", "required": false, "unit": "%"},
+        "nitrogen_oxide_concentration": {"type": "number", "required": false, "unit": "%"},
+        "sulfur_dioxide_concentration": {"type": "number", "required": false, "unit": "%"},
+        "hydrogen_sulfide_concentration": {"type": "number", "required": false, "unit": "%"},
+        "ammonia_concentration": {"type": "number", "required": false, "unit": "%"},
+        "description": {"type": "string", "required": false}
+      }
+    },
+    {
+      "id": "local_ventilation",
+      "name": "局部通风机与风筒",
+      "query_file": "local_ventilation.cypher",
+      "aliases": ["局部通风", "局部通风机", "风筒", "掘进通风", "压入式局部通风机", "local_ventilation"],
+      "keywords": ["局部通风机", "风筒", "掘进", "回风口", "风电闭锁", "甲烷电闭锁", "备用局部通风机", "停风"],
+      "schema": {
+        "facility_type": {"type": "string", "required": false, "description": "设施类型，如局部通风机、风筒、备用局部通风机"},
+        "location": {"type": "string", "required": false, "description": "安装或作业地点，如掘进工作面、进风巷道"},
+        "distance_to_return_air_m": {"type": "number", "required": false, "unit": "m", "description": "压入式局部通风机距掘进巷道回风口距离"},
+        "has_wind_power_lock": {"type": "boolean", "required": false},
+        "has_methane_lock": {"type": "boolean", "required": false},
+        "has_backup_fan": {"type": "boolean", "required": false},
+        "air_duct_material": {"type": "string", "required": false},
+        "air_duct_status": {"type": "string", "required": false},
+        "description": {"type": "string", "required": false}
+      }
+    },
+    {
+      "id": "ventilation_facility",
+      "name": "风门风墙等通风设施",
+      "query_file": "ventilation_facility.cypher",
+      "aliases": ["通风设施", "风门", "风墙", "风桥", "风窗", "密闭墙", "联络巷", "ventilation_facility"],
+      "keywords": ["风门", "风墙", "风桥", "风窗", "密闭", "联锁", "反向风门", "联络巷", "倾斜运输巷"],
+      "schema": {
+        "facility_type": {"type": "string", "required": true, "description": "设施类型，如风门、风墙、密闭墙、风桥、风窗"},
+        "location": {"type": "string", "required": false, "description": "设施所在位置，如联络巷、倾斜运输巷"},
+        "door_count": {"type": "number", "required": false, "description": "风门道数"},
+        "has_reverse_door": {"type": "boolean", "required": false},
+        "is_interlocked": {"type": "boolean", "required": false},
+        "inclination_deg": {"type": "number", "required": false, "unit": "deg"},
+        "is_sealed": {"type": "boolean", "required": false},
+        "description": {"type": "string", "required": false}
+      }
+    }
+  ]
+}

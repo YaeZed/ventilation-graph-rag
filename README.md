@@ -1,101 +1,134 @@
-# 矿井通风安全规程 GraphRAG 系统 (Ventilation Safety GraphRAG)
+# 煤矿通风隐患智能辨识系统
 
-本项目是一个基于《煤矿安全规程》（通风部分）构建的 **GraphRAG（图谱+向量增强检索生成）** 智能问答系统。它将非结构化的规程文本解析为 Neo4j 知识图谱，并结合 Milvus 向量数据库与大语言模型 (Qwen-Plus)，实现对复杂通风安全标准的精准提问与多跳推理回答。
+本项目基于《煤矿安全规程》通风相关知识，构建 Neo4j 知识图谱、Milvus 向量索引和 GraphRAG 问答流水线，并提供 Django API 与 Vue3 对话前端。系统支持文字问答、SSE 流式输出，以及基于 Qwen2.5-VL 的现场图片隐患辨识入口。
 
-## 🛠️ 环境要求
+## 当前能力
 
-- Python 3.9+
-- Docker & Docker Compose
-- [Neo4j](https://neo4j.com/) (图数据库)
-- [Milvus](https://milvus.io/) (向量数据库)
-- 阿里云 DashScope API Key (用于调用通义千问模型)
+- 图谱 + 向量混合检索，支持多跳 GraphRAG 推理。
+- Cypher 模板优先检索，适配通风场景的结构化字段。
+- Qwen2.5-VL 两阶段图片理解：场景分类 + 字段抽取。
+- Django REST/SSE API。
+- Vue3 + TypeScript + Pinia 前端，支持图片上传、流式回复和 Markdown 渲染。
 
----
+## 目录速览
 
-## 🚀 快速启动指南 (部署到新电脑)
-
-### 1. 获取代码与依赖安装
-
-首先克隆本仓库到本地，并进入项目目录：
-
-```bash
-git clone https://github.com/你的用户名/你的仓库名.git
-cd 你的仓库名
+```text
+ventilation-graph-rag/
+├── agent/
+│   ├── data_pipeline/          # 规程知识抽取、CSV 构建、Neo4j 入库
+│   ├── rag_system/             # RAG 检索、生成、Cypher 模板、VL 集成
+│   └── connection_manager.py    # Neo4j/Milvus 共享连接
+├── web_backend/                 # Django API + SSE
+├── frontend/                    # Vue3 对话前端
+├── docs/                        # 架构、API、运行手册、状态记录
+├── cypher/                      # Neo4j 导入脚本和 CSV 映射目录
+├── docker-compose.yml           # Neo4j + Milvus + etcd + MinIO
+└── requirements.txt
 ```
 
-接着，建议创建一个虚拟环境来安装依赖包：
+## 快速启动
 
-```bash
-conda create -n graph-rag python=3.10
-conda activate graph-rag
-pip install -r requirements.txt
+### 1. Python 环境
+
+推荐使用项目当前验证过的环境名：
+
+```powershell
+conda create -y -n ventilation-identify-system python=3.10
+conda activate ventilation-identify-system
+D:\Miniconda\envs\ventilation-identify-system\python.exe -m pip install -r requirements.txt
 ```
 
-_(注意：请确保 `requirements.txt` 中包含 `neo4j`, `pymilvus`, `openai`, `python-dotenv`, `python-docx` 等核心依赖)_
+### 2. 环境变量
 
-### 2. 启动底层数据库
-
-系统运行依赖 Neo4j 和 Milvus。得益于完整的 `docker-compose.yml` 配置，你可以一键启动所有必需的数据库服务。
-
-**启动 Neo4j 和 Milvus:**
-在项目根目录运行 `docker-compose`：
-
-```bash
-docker-compose up -d
-```
-
-_启动后：_
-_- Neo4j 可访问 `http://localhost:7474`，默认用户名/密码为 `neo4j` / `160722yaesakura`。_
-_- Milvus 将在后台运行并开放 `19530` 供代码连接。_
-
-### 3. 配置环境变量
-
-在项目根目录下创建一个名为 `.env` 的文件，填入你的通义千问 API 密钥：
+复制 `.env.example` 为 `.env`，至少配置：
 
 ```ini
-DASHSCOPE_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxx
+DASHSCOPE_API_KEY=sk-...
+LLM_MODEL=qwen-plus
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=160722yaesakura
+MILVUS_HOST=localhost
+MILVUS_PORT=19530
 ```
 
-### 4. 知识抽取与图谱构建 (首次运行必需)
+图片识别可额外配置：
 
-因为新电脑的数据库是空的，你需要先对《煤矿安全规程》Word 文档进行大模型智能化信息抽取，并组装写入 Neo4j。
-
-```bash
-cd agent/data_pipeline
-
-# 1. 抽取知识并生成 CSV (调用大模型)
-python run_ventilation_agent.py
-
-# 2. 将 CSV 数据导入 Neo4j (执行此步前请确保 Neo4j 容器已运行)
-python import_to_neo4j.py
+```ini
+QWEN_VL_MODEL=qwen2.5-vl-72b-instruct
 ```
 
-### 5. 向量索引构建与 RAG 系统启动
+### 3. 启动数据库
 
-图数据入库完成后，我们需要把图节点关联的内容打包成富文档并建立 Milvus 向量索引，同时启动问答系统进行测试。
-
-```bash
-cd ../rag_system
-# 带有 --build-index 标志，强制从 Neo4j 抽取数据并构建/更新 Milvus 索引
-python ventilation_rag_pipeline.py --build-index
+```powershell
+docker compose up -d
+docker compose ps
 ```
 
-当终端提示就绪后，你就可以直接在控制台输入问题，体验你的通风规程问答系统了。
+服务端口：
 
----
+- Neo4j HTTP: `http://127.0.0.1:7474`
+- Neo4j Bolt: `bolt://127.0.0.1:7687`
+- Milvus: `127.0.0.1:19530`
+- MinIO Console: `http://127.0.0.1:9001`
 
-## 💻 日常使用
+### 4. 后端验证和启动
 
-完成首次数据入库和建索引后，之后常规启动问答系统，只需保证 Docker 环境里的图库和向量库是运行状态：
-
-```bash
-cd agent/rag_system
-python ventilation_rag_pipeline.py
+```powershell
+D:\Miniconda\envs\ventilation-identify-system\python.exe web_backend\manage.py check
+D:\Miniconda\envs\ventilation-identify-system\python.exe web_backend\manage.py runserver 127.0.0.1:8000 --noreload
 ```
 
-_(已存在向量索引的情况下，不需要加 `--build-index` 参数)_
+### 5. 前端启动
 
-## 📂 核心项目结构简述
+```powershell
+cd frontend
+npm install
+npm run dev
+```
 
-- `agent/data_pipeline/`: **知识入库与图谱构建**流水线，负责文档解析 (Word)、智能信息抽取与图数据库入库。
-- `agent/rag_system/`: **检索与生成系统**，包含图检索、混合检索、多跳 GraphRAG 推理、智能路由等检索增强能力。
+打开 `http://127.0.0.1:5173`。
+
+## 常用验证
+
+```powershell
+# Cypher 模板测试
+D:\Miniconda\envs\ventilation-identify-system\python.exe agent\rag_system\test_ventilation_cypher_templates.py
+
+# VL 抽取逻辑测试（fake client，不依赖真实 Qwen-VL）
+D:\Miniconda\envs\ventilation-identify-system\python.exe agent\rag_system\test_ventilation_vision_extractor.py
+
+# 真实 CLI 问答
+D:\Miniconda\envs\ventilation-identify-system\python.exe agent\rag_system\ventilation_rag_pipeline.py -q "掘进中的岩巷最低风速要求是多少" --top-k 3
+
+# 前端生产构建
+cd frontend
+npm run build
+```
+
+## API 简例
+
+```powershell
+curl -X POST http://127.0.0.1:8000/api/chat/ `
+  -H "Content-Type: application/json" `
+  -d "{\"question\":\"掘进中的岩巷最低风速要求是多少\",\"top_k\":3}"
+```
+
+流式接口：
+
+```powershell
+curl -N -X POST http://127.0.0.1:8000/api/chat/stream/ `
+  -H "Content-Type: application/json" `
+  -d "{\"question\":\"矿井有害气体最高允许浓度范围是什么\",\"top_k\":5}"
+```
+
+更多接口说明见 [docs/api.md](docs/api.md)。
+
+## 文档
+
+- [docs/architecture.md](docs/architecture.md)：系统架构和数据流
+- [docs/api.md](docs/api.md)：REST/SSE API
+- [docs/runbook.md](docs/runbook.md)：运行、验证、排障
+- [docs/status.md](docs/status.md)：当前状态和剩余风险
+- [docs/grill-me-interview/](docs/grill-me-interview/)：设计访谈、阶段计划和开发日志
+

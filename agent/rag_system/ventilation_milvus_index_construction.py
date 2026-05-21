@@ -17,14 +17,16 @@ class VentilationMilvusIndexConstruction:
                  port: int = 19530,
                  collection_name: str = "ventilation_knowledge",
                  dimension: int = 512,
-                 model_name: str = "BAAI/bge-small-zh-v1.5"):
+                 model_name: str = "BAAI/bge-small-zh-v1.5",
+                 milvus_client: Optional[MilvusClient] = None):
         self.host = host
         self.port = port
         self.collection_name = collection_name
         self.dimension = dimension
         self.model_name = model_name
 
-        self.client = None
+        self.client = milvus_client
+        self._owns_client = milvus_client is None
         self.embeddings = None
         self.collection_created = False
 
@@ -38,6 +40,10 @@ class VentilationMilvusIndexConstruction:
 
     def _setup_client(self):
         """初始化Milvus客户端"""
+        if self.client is not None:
+            logger.info("Milvus 索引模块复用外部 Milvus client")
+            return
+
         try:
             self.client = MilvusClient(uri=f"http://{self.host}:{self.port}")
             logger.info(f"已连接到Milvus服务端: {self.host}:{self.port}")
@@ -265,7 +271,11 @@ class VentilationMilvusIndexConstruction:
         return self.client.has_collection(self.collection_name)
 
     def close(self):
-        pass
+        if self._owns_client and self.client is not None:
+            close = getattr(self.client, "close", None)
+            if callable(close):
+                close()
+            self.client = None
 
     def __del__(self):
         self.close()

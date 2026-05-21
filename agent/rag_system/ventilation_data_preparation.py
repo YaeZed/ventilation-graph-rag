@@ -8,7 +8,7 @@
 import sys
 import os
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from neo4j import GraphDatabase
 from langchain_core.documents import Document
@@ -32,7 +32,14 @@ class VentilationDataPreparationModule:
     get_statistics()          → 统计信息
     """
 
-    def __init__(self, uri: str, user: str, password: str, database: str = "neo4j"):
+    def __init__(
+        self,
+        uri: str = None,
+        user: str = None,
+        password: str = None,
+        database: str = "neo4j",
+        neo4j_driver: Optional[Any] = None,
+    ):
         """
         初始化图数据库连接
         
@@ -41,12 +48,14 @@ class VentilationDataPreparationModule:
             user: 用户名
             password: 密码
             database: 数据库名称
+            neo4j_driver: 外部共享 Neo4j driver
         """
         self.uri = uri
         self.user = user
         self.password = password
         self.database = database
-        self.driver = None
+        self.driver = neo4j_driver
+        self._owns_driver = neo4j_driver is None
 
         # 通风领域数据容器
         self.articles: List[GraphNode]    = []  # 存放所有"条款"节点
@@ -65,20 +74,24 @@ class VentilationDataPreparationModule:
         self.documents: List[Document] = []
         self.chunks: List[Document] = []
 
-        self._connect()
+        if self._owns_driver:
+            self._connect()
+        else:
+            logger.info("通风数据准备模块复用外部 Neo4j driver")
         
     def _connect(self):
         """建立Neo4j连接"""
         try:
+            if not self.uri or not self.user or not self.password:
+                raise ValueError("自建 Neo4j 连接需要 uri、user、password")
             self.driver = GraphDatabase.driver(
                 self.uri, 
                 auth=(self.user, self.password),
-                database=self.database
             )
             logger.info(f"已连接到Neo4j数据库: {self.uri}")
             
             # 测试连接
-            with self.driver.session() as session:
+            with self.driver.session(database=self.database) as session:
                 result = session.run("RETURN 1 as test")
                 test_result = result.single()
                 if test_result:
@@ -89,8 +102,9 @@ class VentilationDataPreparationModule:
             raise
     def close(self):
         """关闭数据库连接"""
-        if hasattr(self, 'driver') and self.driver:
+        if self._owns_driver and hasattr(self, 'driver') and self.driver:
             self.driver.close()
+            self.driver = None
             logger.info("Neo4j连接已关闭")
     # ──────────────────────────────────────────────────────────
     # 1. 加载图数据
@@ -99,7 +113,7 @@ class VentilationDataPreparationModule:
         """从 Neo4j 加载通风规程图数据"""
         logger.info("正在从 Neo4j 加载通风规程图数据...")
 
-        with self.driver.session() as session:
+        with self.driver.session(database=self.database) as session:
         # 它创建了一个会话（Session），with 语句确保查询完成后，连接会被正确关闭，不会占用资源。
 
             # ── 条款 ──────────────────────────────────────────
@@ -199,7 +213,7 @@ class VentilationDataPreparationModule:
         logger.info("正在构建通风规程条款文档...")
         documents = []
 
-        with self.driver.session() as session:
+        with self.driver.session(database=self.database) as session:
             for article in self.articles:
                 try:
                     art_id = article.node_id

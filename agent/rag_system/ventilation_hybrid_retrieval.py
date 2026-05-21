@@ -32,21 +32,27 @@ class RetrievalResult:
 class VentilationHybridRetrieval:
     """通风安全规程混合检索模块"""
 
-    def __init__(self, config, data_module, milvus_module, llm_client):
+    def __init__(self, config, data_module, milvus_module, llm_client, neo4j_driver=None):
         self.config = config
         self.data_module = data_module
         self.milvus_module = milvus_module
         self.llm_client = llm_client
+        self.neo4j_database = getattr(config, "neo4j_database", os.getenv("NEO4J_DATABASE", "neo4j"))
         
         # 初始化图索引模块
         self.graph_indexing = VentilationGraphIndexingModule(config, llm_client)
         self.graph_indexed = False
         
-        # Neo4j 连接
-        uri = getattr(config, "neo4j_uri", os.getenv("NEO4J_URI", "bolt://localhost:7687"))
-        user = getattr(config, "neo4j_user", os.getenv("NEO4J_USER", "neo4j"))
-        password = getattr(config, "neo4j_password", os.getenv("NEO4J_PASSWORD", "password"))
-        self.driver = GraphDatabase.driver(uri, auth=(user, password))
+        # Neo4j 连接：优先复用 ConnectionManager 提供的共享 driver
+        self._owns_driver = neo4j_driver is None
+        if neo4j_driver is not None:
+            self.driver = neo4j_driver
+            logger.info("通风混合检索模块复用外部 Neo4j driver")
+        else:
+            uri = getattr(config, "neo4j_uri", os.getenv("NEO4J_URI", "bolt://localhost:7687"))
+            user = getattr(config, "neo4j_user", os.getenv("NEO4J_USER", "neo4j"))
+            password = getattr(config, "neo4j_password", os.getenv("NEO4J_PASSWORD", "password"))
+            self.driver = GraphDatabase.driver(uri, auth=(user, password))
         
         logger.info("通风混合检索模块初始化完成")
 
@@ -121,7 +127,7 @@ class VentilationHybridRetrieval:
         构建含完整参数表的 Document，用于风速查询时强制注入。
         """
         try:
-            with self.driver.session() as session:
+            with self.driver.session(database=self.neo4j_database) as session:
                 cypher = """
                 MATCH (a:Article)
                 WHERE a.name = '第一百五十七条' OR a.node_id CONTAINS '157'
@@ -194,7 +200,7 @@ class VentilationHybridRetrieval:
                 continue
 
             try:
-                with self.driver.session() as session:
+                with self.driver.session(database=self.neo4j_database) as session:
                     cypher = """
                     MATCH (a:Article)
                     WHERE a.node_id = $nid OR a.name = $nid
@@ -359,7 +365,7 @@ class VentilationHybridRetrieval:
     def _get_node_neighbors(self, node_id: str, max_neighbors: int = 3) -> List[str]:
         """Neo4j 查询邻居节点名称 - 显式使用通风领域标签"""
         try:
-            with self.driver.session() as session:
+            with self.driver.session(database=self.neo4j_database) as session:
                 # 显式使用 node_id 属性，避免基类的 nodeId 错误
                 result = session.run("""
                     MATCH (n)-[]-(nb)
@@ -374,6 +380,7 @@ class VentilationHybridRetrieval:
 
     def close(self):
         """资源释放"""
-        if self.driver:
+        if self._owns_driver and self.driver:
             self.driver.close()
+            self.driver = None
         logger.info("混合检索连接已关闭")

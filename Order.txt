@@ -1,0 +1,39 @@
+Project root:
+D:\projects\personal_projects\ventilation-graph-rag
+
+1. Start database services
+Folder:
+D:\projects\personal_projects\ventilation-graph-rag
+Command:
+docker compose up -d
+
+2. Start Django backend
+Folder:
+D:\projects\personal_projects\ventilation-graph-rag
+Command:
+conda activate ventilation-identify-system
+D:\Miniconda\envs\ventilation-identify-system\python.exe web_backend\manage.py runserver 127.0.0.1:8000 --noreload
+
+3. Start Vue frontend
+Folder:
+D:\projects\personal_projects\ventilation-graph-rag\frontend
+Command:
+npm run dev
+
+4. Open browser
+URL:
+http://127.0.0.1:5173
+
+Optional checks
+Folder:
+D:\projects\personal_projects\ventilation-graph-rag
+Commands:
+D:\Miniconda\envs\ventilation-identify-system\python.exe web_backend\manage.py check
+D:\Miniconda\envs\ventilation-identify-system\python.exe agent\rag_system\test_ventilation_cypher_templates.py
+D:\Miniconda\envs\ventilation-identify-system\python.exe agent\rag_system\test_ventilation_vision_extractor.py
+
+Frontend build check
+Folder:
+D:\projects\personal_projects\ventilation-graph-rag\frontend
+Command:
+npm run build
