@@ -522,6 +522,120 @@ button {
   white-space: pre-wrap;
 }
 
+.agent-steps {
+  margin: 4px 0 14px;
+  border: 1px solid #dfe8e4;
+  border-radius: 8px;
+  background: #fbfdfc;
+}
+
+.steps-summary {
+  display: flex;
+  width: 100%;
+  min-height: 42px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 12px;
+  color: #29443c;
+  background: transparent;
+  cursor: pointer;
+  font-size: 13px;
+  text-align: left;
+}
+
+.chevron {
+  flex: 0 0 auto;
+  color: #6c7a74;
+  font-size: 12px;
+}
+
+.step-list {
+  margin: 0;
+  padding: 0 12px 12px;
+  list-style: none;
+}
+
+.step-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 10px;
+  padding: 8px 0;
+  color: #53625c;
+}
+
+.step-item:not(:last-child)::after {
+  position: absolute;
+  top: 25px;
+  bottom: -8px;
+  left: 7px;
+  width: 2px;
+  background: #dce8e3;
+  content: "";
+}
+
+.step-dot {
+  z-index: 1;
+  width: 16px;
+  height: 16px;
+  margin-top: 3px;
+  border: 2px solid #b8c8c2;
+  border-radius: 50%;
+  background: #fff;
+}
+
+.step-item.done .step-dot {
+  border-color: var(--success-color);
+  background: var(--success-color);
+}
+
+.step-item.active .step-dot {
+  border-color: var(--warning-color);
+  background: #fff8e6;
+  animation: step-pulse 1.2s ease-in-out infinite;
+}
+
+.step-item.error .step-dot {
+  border-color: var(--danger-color);
+  background: var(--danger-color);
+}
+
+.step-item strong {
+  display: block;
+  color: #243b34;
+  font-size: 13px;
+}
+
+.step-item p {
+  margin: 2px 0 0;
+  color: #52615c;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.step-item small {
+  display: block;
+  margin-top: 3px;
+  color: #7a8983;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+@keyframes step-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(178, 106, 0, 0.3);
+  }
+
+  70% {
+    box-shadow: 0 0 0 8px rgba(178, 106, 0, 0);
+  }
+
+  100% {
+    box-shadow: 0 0 0 0 rgba(178, 106, 0, 0);
+  }
+}
+
 .markdown-body {
   overflow-x: auto;
   color: #26322e;
@@ -766,4 +880,5 @@ button {
     right: 16px;
     left: 16px;
   }
+
 }

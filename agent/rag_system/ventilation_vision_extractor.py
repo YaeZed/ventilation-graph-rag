@@ -1,10 +1,13 @@
 """
-Two-stage Qwen-VL extractor for ventilation hazard images.
+Qwen-VL extractor for ventilation hazard images.
 
-Stage 1 classifies the image into one of the deterministic Cypher template
-scenes. Stage 2 extracts the structured fields required by that scene, plus a
-natural-language description for vector fallback retrieval.
+The image flow is intentionally two-pass:
+1. Observe the site photo and name uncertain ventilation concepts.
+2. Retrieve concept definition cards, then analyze the same image again with
+   those definitions injected into the prompt.
 """
+
+from __future__ import annotations
 
 import base64
 import json
@@ -12,8 +15,8 @@ import logging
 import mimetypes
 import os
 import re
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field
+from typing import Any
 
 from openai import OpenAI
 
@@ -24,31 +27,38 @@ logger = logging.getLogger(__name__)
 class VisionExtractionResult:
     scene_id: str
     scene_name: str
-    structured_fields: Dict[str, Any]
+    structured_fields: dict[str, Any]
     description: str
     confidence: float = 0.0
     raw_classification: str = ""
     raw_extraction: str = ""
+    raw_observations: str = ""
+    uncertain_concepts: list[str] = field(default_factory=list)
+    concepts_retrieved: list[dict[str, Any]] = field(default_factory=list)
+    key_observations: list[str] = field(default_factory=list)
+    primary_hazard: str = ""
+    risk_level: str = "需要注意"
 
 
 class VentilationVisionExtractor:
-    """Classify a ventilation image and extract scene-specific fields."""
+    """Observe, classify, and extract structured fields from a site image."""
 
     def __init__(
         self,
         config: Any = None,
-        scene_schemas: Optional[List[Dict[str, Any]]] = None,
-        client: Optional[OpenAI] = None,
+        scene_schemas: list[dict[str, Any]] | None = None,
+        client: OpenAI | None = None,
+        concept_retriever: Any = None,
     ):
         self.config = config
         self.scene_schemas = scene_schemas or []
+        self.concept_retriever = concept_retriever
         self.model_name = (
             getattr(config, "vl_model", None)
             or os.getenv("QWEN_VL_MODEL")
             or os.getenv("VL_MODEL")
-            or "qwen2.5-vl-72b-instruct"
+            or "qwen3.5-omni-plus"
         )
-
         self.client = client or OpenAI(
             api_key=os.getenv("DASHSCOPE_API_KEY") or "sk-dummy",
             base_url=os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
@@ -56,114 +66,173 @@ class VentilationVisionExtractor:
         logger.info("通风视觉提取模块初始化完成，模型: %s", self.model_name)
 
     def extract(self, image_path: str, user_question: str = "") -> VisionExtractionResult:
-        """Run two-stage scene classification and structured extraction."""
+        """Run the full observe -> concept retrieval -> analysis flow."""
         image_url = self._image_to_url(image_path)
-
-        scene_id, scene_name, confidence, raw_classification = self._classify_scene(
+        observation = self.observe(image_url=image_url, user_question=user_question)
+        concepts = self.retrieve_concepts(observation)
+        return self.analyze_with_concepts(
             image_url=image_url,
             user_question=user_question,
-        )
-        scene_schema = self._find_scene_schema(scene_id)
-        if not scene_schema:
-            raise ValueError(f"VL 场景分类结果无对应 schema: {scene_id}")
-
-        structured_fields, description, raw_extraction = self._extract_fields(
-            image_url=image_url,
-            scene_schema=scene_schema,
-            user_question=user_question,
-        )
-        structured_fields["scene"] = scene_id
-
-        return VisionExtractionResult(
-            scene_id=scene_id,
-            scene_name=scene_name or scene_schema.get("name", scene_id),
-            structured_fields=structured_fields,
-            description=description,
-            confidence=confidence,
-            raw_classification=raw_classification,
-            raw_extraction=raw_extraction,
+            observation=observation,
+            concepts=concepts,
         )
 
-    def _classify_scene(self, image_url: str, user_question: str = "") -> tuple[str, str, float, str]:
+    def observe(self, image_url: str, user_question: str = "") -> dict[str, Any]:
+        """Pass 1: observe the image without forcing a final conclusion."""
+        prompt = f"""你是一位矿井通风安全检查员，正在查看井下现场照片。
+
+请仔细观察图片，先不要急于下最终结论，回答以下问题：
+1. 你看到了哪些通风设施、设备和环境特征？
+2. 图片中哪些现象可能提示存在安全隐患？
+3. 有哪些通风专业概念需要更多定义才能确认？例如“循环风”“串联通风”“风电闭锁”等。
+4. 初步猜测属于哪种检查场景？
+
+用户补充问题：{user_question or "无"}
+
+请返回严格 JSON，不要输出 Markdown：
+{{
+  "raw_observations": "对图片可见内容的客观观察",
+  "uncertain_concepts": ["概念1", "概念2"],
+  "preliminary_scene": "初步场景",
+  "preliminary_concern": "初步担忧"
+}}"""
+        raw = self._chat_with_image(image_url, prompt, temperature=0.3)
+        data = self._parse_json(raw)
+        concepts = data.get("uncertain_concepts") or []
+        if not isinstance(concepts, list):
+            concepts = [concepts]
+        return {
+            "raw_observations": str(data.get("raw_observations") or ""),
+            "uncertain_concepts": [str(item).strip() for item in concepts if str(item).strip()],
+            "preliminary_scene": str(data.get("preliminary_scene") or ""),
+            "preliminary_concern": str(data.get("preliminary_concern") or ""),
+            "raw_response": raw,
+        }
+
+    def retrieve_concepts(self, observation: dict[str, Any]) -> list[Any]:
+        """Retrieve professional concept definition cards for Pass 2."""
+        if not self.concept_retriever:
+            return []
+        extra_text = " ".join(
+            [
+                observation.get("raw_observations", ""),
+                observation.get("preliminary_scene", ""),
+                observation.get("preliminary_concern", ""),
+            ]
+        )
+        return self.concept_retriever.search_concepts(
+            queries=observation.get("uncertain_concepts") or [],
+            extra_text=extra_text,
+            top_k=5,
+        )
+
+    def analyze_with_concepts(
+        self,
+        image_url: str,
+        user_question: str = "",
+        observation: dict[str, Any] | None = None,
+        concepts: list[Any] | None = None,
+    ) -> VisionExtractionResult:
+        """Pass 2: analyze the image with concept definitions injected."""
+        observation = observation or {}
+        concepts = concepts or []
         scene_options = [
             {
                 "id": scene.get("id"),
                 "name": scene.get("name"),
                 "keywords": scene.get("keywords", []),
                 "aliases": scene.get("aliases", []),
+                "schema": scene.get("schema", {}),
             }
             for scene in self.scene_schemas
         ]
-        prompt = f"""你是煤矿通风安全图像理解专家。请只从下面枚举的场景中选择一个最匹配的场景。
+        concept_cards = self._format_concepts(concepts)
 
-场景枚举：
+        prompt = f"""你是一位经验丰富的煤矿通风安全图像理解专家。
+
+你已经完成第一轮观察：
+{json.dumps(observation, ensure_ascii=False, indent=2)}
+
+现在你获得了以下通风专业概念定义，请带着这些定义重新分析图片。
+
+【概念参考卡片】
+{concept_cards}
+
+【可选场景与字段 schema】
 {json.dumps(scene_options, ensure_ascii=False, indent=2)}
 
 用户补充问题：{user_question or "无"}
+
+请完成：
+1. 从可选场景中选择最匹配的 scene_id。
+2. 按该场景 schema 提取 structured 字段；不确定填 null。
+3. 给出 key_observations、primary_hazard 和 risk_level。
+4. 区分图片能直接支持的事实与需要结合现场经验的判断。
+
+risk_level 只能取："正常"、"需要注意"、"疑似隐患"、"明确隐患"。
 
 请返回严格 JSON，不要输出 Markdown：
 {{
   "scene_id": "airflow_speed",
   "scene_name": "井巷风速合规",
   "confidence": 0.0,
-  "reason": "简要说明"
+  "structured": {{}},
+  "description": "自然语言描述",
+  "key_observations": ["观察1", "观察2"],
+  "primary_hazard": "主要隐患判断",
+  "risk_level": "疑似隐患"
 }}"""
-        raw = self._chat_with_image(image_url, prompt)
+        raw = self._chat_with_image(image_url, prompt, temperature=0.25)
         data = self._parse_json(raw)
+
         scene_id = self._normalize_scene_id(str(data.get("scene_id") or ""))
         scene_schema = self._find_scene_schema(scene_id)
         if not scene_schema:
-            scene_id = self._fallback_scene_id(raw + " " + user_question)
-            scene_schema = self._find_scene_schema(scene_id)
+            scene_id = self._fallback_scene_id(
+                " ".join(
+                    [
+                        raw,
+                        user_question,
+                        observation.get("raw_observations", ""),
+                        observation.get("preliminary_scene", ""),
+                    ]
+                )
+            )
+            scene_schema = self._find_scene_schema(scene_id or "")
 
         if not scene_schema:
             raise ValueError(f"无法识别图片场景: {raw}")
 
-        return (
-            scene_schema["id"],
-            data.get("scene_name") or scene_schema.get("name", scene_schema["id"]),
-            float(data.get("confidence") or 0.0),
-            raw,
-        )
-
-    def _extract_fields(
-        self,
-        image_url: str,
-        scene_schema: Dict[str, Any],
-        user_question: str = "",
-    ) -> tuple[Dict[str, Any], str, str]:
-        prompt = f"""你是煤矿通风安全图像结构化抽取专家。请根据图片和用户问题，按照给定 schema 抽取现场信息。
-
-场景：{scene_schema.get("name")} ({scene_schema.get("id")})
-字段 schema：
-{json.dumps(scene_schema.get("schema", {}), ensure_ascii=False, indent=2)}
-
-抽取要求：
-1. 只能抽取图片或用户问题中能支持的信息；不确定的字段填 null。
-2. 数值字段只返回数字，不要带单位。
-3. 布尔字段返回 true/false/null。
-4. description 用自然语言概括图片中的通风设施、地点、可见风险和不确定点。
-
-用户补充问题：{user_question or "无"}
-
-请返回严格 JSON，不要输出 Markdown：
-{{
-  "structured": {{}},
-  "description": ""
-}}"""
-        raw = self._chat_with_image(image_url, prompt)
-        data = self._parse_json(raw)
         structured = data.get("structured") or {}
         if not isinstance(structured, dict):
             structured = {}
-
         cleaned = self._clean_structured_fields(structured, scene_schema.get("schema", {}))
         description = str(data.get("description") or structured.get("description") or "").strip()
         if description:
             cleaned["description"] = description
-        return cleaned, description, raw
+        cleaned["scene"] = scene_schema["id"]
 
-    def _chat_with_image(self, image_url: str, prompt: str) -> str:
+        key_observations = data.get("key_observations") or []
+        if not isinstance(key_observations, list):
+            key_observations = [key_observations]
+
+        return VisionExtractionResult(
+            scene_id=scene_schema["id"],
+            scene_name=data.get("scene_name") or scene_schema.get("name", scene_schema["id"]),
+            structured_fields=cleaned,
+            description=description,
+            confidence=float(data.get("confidence") or 0.0),
+            raw_classification=json.dumps(observation, ensure_ascii=False),
+            raw_extraction=raw,
+            raw_observations=observation.get("raw_observations", ""),
+            uncertain_concepts=observation.get("uncertain_concepts", []),
+            concepts_retrieved=[self._concept_to_dict(card) for card in concepts],
+            key_observations=[str(item).strip() for item in key_observations if str(item).strip()],
+            primary_hazard=str(data.get("primary_hazard") or ""),
+            risk_level=self._normalize_risk_level(str(data.get("risk_level") or "")),
+        )
+
+    def _chat_with_image(self, image_url: str, prompt: str, temperature: float = 0.1) -> str:
         response = self.client.chat.completions.create(
             model=self.model_name,
             messages=[
@@ -175,14 +244,13 @@ class VentilationVisionExtractor:
                     ],
                 }
             ],
-            temperature=0.1,
+            temperature=temperature,
         )
         return response.choices[0].message.content.strip()
 
     def _image_to_url(self, image_path: str) -> str:
         if image_path.startswith(("http://", "https://", "data:")):
             return image_path
-
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"图片不存在: {image_path}")
 
@@ -191,7 +259,7 @@ class VentilationVisionExtractor:
             encoded = base64.b64encode(f.read()).decode("ascii")
         return f"data:{mime_type};base64,{encoded}"
 
-    def _parse_json(self, content: str) -> Dict[str, Any]:
+    def _parse_json(self, content: str) -> dict[str, Any]:
         text = content.strip()
         if text.startswith("```"):
             text = re.sub(r"^```(?:json)?", "", text, flags=re.IGNORECASE).strip()
@@ -207,10 +275,10 @@ class VentilationVisionExtractor:
 
     def _clean_structured_fields(
         self,
-        structured: Dict[str, Any],
-        schema: Dict[str, Dict[str, Any]],
-    ) -> Dict[str, Any]:
-        cleaned: Dict[str, Any] = {}
+        structured: dict[str, Any],
+        schema: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        cleaned: dict[str, Any] = {}
         for field, spec in schema.items():
             value = structured.get(field)
             if value in ("", "未知", "不确定"):
@@ -228,7 +296,7 @@ class VentilationVisionExtractor:
             cleaned[field] = value
         return cleaned
 
-    def _coerce_bool(self, value: Any) -> Optional[bool]:
+    def _coerce_bool(self, value: Any) -> bool | None:
         if isinstance(value, bool):
             return value
         if value is None:
@@ -240,7 +308,7 @@ class VentilationVisionExtractor:
             return False
         return None
 
-    def _find_scene_schema(self, scene_id: str) -> Optional[Dict[str, Any]]:
+    def _find_scene_schema(self, scene_id: str) -> dict[str, Any] | None:
         scene_key = self._normalize_scene_id(scene_id)
         for scene in self.scene_schemas:
             if scene.get("id") == scene_key:
@@ -250,7 +318,7 @@ class VentilationVisionExtractor:
                 return scene
         return None
 
-    def _fallback_scene_id(self, text: str) -> Optional[str]:
+    def _fallback_scene_id(self, text: str) -> str | None:
         best_scene = None
         best_score = 0
         for scene in self.scene_schemas:
@@ -258,6 +326,11 @@ class VentilationVisionExtractor:
             for keyword in scene.get("keywords", []):
                 if keyword and keyword in text:
                     score += 1
+            for alias in scene.get("aliases", []):
+                if alias and alias in text:
+                    score += 1
+            if scene.get("name") and scene.get("name") in text:
+                score += 1
             if score > best_score:
                 best_scene = scene
                 best_score = score
@@ -266,3 +339,30 @@ class VentilationVisionExtractor:
     def _normalize_scene_id(self, scene_id: str) -> str:
         return scene_id.strip().lower().replace("-", "_").replace(" ", "_")
 
+    def _normalize_risk_level(self, risk_level: str) -> str:
+        allowed = {"正常", "需要注意", "疑似隐患", "明确隐患"}
+        value = risk_level.strip()
+        return value if value in allowed else "需要注意"
+
+    def _format_concepts(self, concepts: list[Any]) -> str:
+        if self.concept_retriever and hasattr(self.concept_retriever, "format_cards"):
+            return self.concept_retriever.format_cards(concepts)
+        if not concepts:
+            return "未检索到明确概念定义。"
+        return json.dumps([self._concept_to_dict(card) for card in concepts], ensure_ascii=False, indent=2)
+
+    def _concept_to_dict(self, card: Any) -> dict[str, Any]:
+        if hasattr(card, "as_dict"):
+            return card.as_dict()
+        if isinstance(card, dict):
+            return card
+        return {
+            "name": getattr(card, "name", ""),
+            "aliases": getattr(card, "aliases", []),
+            "definition": getattr(card, "definition", ""),
+            "identification_features": getattr(card, "identification_features", ""),
+            "visual_clues": getattr(card, "visual_clues", ""),
+            "typical_scenarios": getattr(card, "typical_scenarios", ""),
+            "hazard_significance": getattr(card, "hazard_significance", ""),
+            "source": getattr(card, "source", ""),
+        }

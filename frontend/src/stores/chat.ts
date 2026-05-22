@@ -1,8 +1,22 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import { sendImageMessage, sendTextMessage, streamMessage } from '@/api/chat'
+import {
+  sendImageMessage,
+  sendTextMessage,
+  streamMessage,
+  type StreamStepEvent,
+} from '@/api/chat'
 
 export type MessageRole = 'user' | 'assistant'
+export type AgentStepStatus = 'pending' | 'active' | 'done' | 'error'
+
+export type AgentStep = {
+  key: string
+  label: string
+  message: string
+  status: AgentStepStatus
+  data?: Record<string, unknown>
+}
 
 export type ChatMessage = {
   id: string
@@ -12,6 +26,8 @@ export type ChatMessage = {
   sourceFileName?: string
   createdAt: string
   status?: 'streaming' | 'done' | 'error'
+  steps?: AgentStep[]
+  currentStatus?: string
 }
 
 export type Conversation = {
@@ -22,6 +38,25 @@ export type Conversation = {
 }
 
 const createId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`
+
+const STEP_LABELS: Record<string, string> = {
+  vision_observe: '观察图片',
+  vision_observe_done: '观察完成',
+  concept_search: '学习概念',
+  concept_search_done: '概念完成',
+  vision_analyze: '重新分析',
+  vision_analyze_done: '分析完成',
+  cypher_match: '匹配规程',
+  cypher_match_done: '规程完成',
+  generating: '生成报告',
+}
+
+const DONE_STEPS: Record<string, string> = {
+  vision_observe_done: 'vision_observe',
+  concept_search_done: 'concept_search',
+  vision_analyze_done: 'vision_analyze',
+  cypher_match_done: 'cypher_match',
+}
 
 export const useChatStore = defineStore('chat', () => {
   const initialConversation: Conversation = {
@@ -95,12 +130,15 @@ export const useChatStore = defineStore('chat', () => {
       if (useStream) {
         await streamMessage(userMessage.content, image, {
           onStatus(message) {
-            if (!hasReceivedToken) {
-              updateMessage(assistantMessage.id, {
-                content: normalizeStatusMessage(message),
-                status: 'streaming',
-              })
+            const current = findMessage(assistantMessage.id)
+            if (!current) return
+            current.currentStatus = normalizeStatusMessage(message)
+            if (!hasReceivedToken && !current.steps?.length) {
+              current.content = current.currentStatus
             }
+          },
+          onStep(step) {
+            applyStep(assistantMessage.id, step)
           },
           onToken(content) {
             const current = findMessage(assistantMessage.id)
@@ -108,23 +146,32 @@ export const useChatStore = defineStore('chat', () => {
             if (!hasReceivedToken) {
               current.content = ''
               hasReceivedToken = true
+              markActiveStepsDone(current)
             }
             current.content += content
             current.status = 'streaming'
           },
           onError(message) {
+            const current = findMessage(assistantMessage.id)
+            if (current?.steps) {
+              current.steps.forEach((step) => {
+                if (step.status === 'active') step.status = 'error'
+              })
+            }
             updateMessage(assistantMessage.id, { content: message, status: 'error' })
             error.value = message
           },
           onDone() {
             const current = findMessage(assistantMessage.id)
             if (!current || current.status === 'error') return
+            markActiveStepsDone(current)
             if (!current.content.trim()) current.content = '未收到有效回答'
             current.status = 'done'
           },
         })
         const current = findMessage(assistantMessage.id)
         if (current?.status === 'streaming') {
+          markActiveStepsDone(current)
           current.status = 'done'
         }
       } else {
@@ -173,6 +220,50 @@ export const useChatStore = defineStore('chat', () => {
     const message = findMessage(id)
     if (!message) return
     Object.assign(message, updates)
+  }
+
+  function applyStep(messageId: string, event: StreamStepEvent) {
+    const message = findMessage(messageId)
+    if (!message) return
+    if (!message.steps) message.steps = []
+
+    const doneTarget = DONE_STEPS[event.step]
+    if (doneTarget) {
+      const target = message.steps.find((step) => step.key === doneTarget)
+      if (target) {
+        target.status = 'done'
+        target.message = event.message || target.message
+        target.data = event.data
+        message.currentStatus = event.message
+        message.status = 'streaming'
+        return
+      }
+    }
+
+    markActiveStepsDone(message)
+    const existing = message.steps.find((step) => step.key === event.step)
+    const status: AgentStepStatus = event.step.endsWith('_done') ? 'done' : 'active'
+    if (existing) {
+      existing.message = event.message
+      existing.status = status
+      existing.data = event.data
+    } else {
+      message.steps.push({
+        key: event.step,
+        label: STEP_LABELS[event.step] || event.step,
+        message: event.message,
+        status,
+        data: event.data,
+      })
+    }
+    message.currentStatus = event.message
+    message.status = 'streaming'
+  }
+
+  function markActiveStepsDone(message: ChatMessage) {
+    message.steps?.forEach((step) => {
+      if (step.status === 'active') step.status = 'done'
+    })
   }
 
   function buildTitle(content: string) {

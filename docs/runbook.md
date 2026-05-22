@@ -34,7 +34,7 @@ MILVUS_PORT=19530
 可选：
 
 ```ini
-QWEN_VL_MODEL=qwen2.5-vl-72b-instruct
+QWEN_VL_MODEL=qwen3.5-omni-plus
 DJANGO_DEBUG=1
 DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1
 VENTILATION_PIPELINE_FORCE_REBUILD=0
@@ -61,6 +61,7 @@ docker compose ps
 D:\Miniconda\envs\ventilation-identify-system\python.exe web_backend\manage.py check
 D:\Miniconda\envs\ventilation-identify-system\python.exe agent\rag_system\test_ventilation_cypher_templates.py
 D:\Miniconda\envs\ventilation-identify-system\python.exe agent\rag_system\test_ventilation_vision_extractor.py
+D:\Miniconda\envs\ventilation-identify-system\python.exe web_backend\chat\test_vision_evaluation.py
 ```
 
 真实 RAG CLI：
@@ -121,3 +122,10 @@ Codex 沙箱中可能无法直接执行 WindowsApps 下的 `node.exe`。用系�
 
 Django pipeline 是懒加载。第一次请求会初始化 RAG、连接 Neo4j/Milvus、加载嵌入模型和索引，后续请求复用同一实例。
 
+### 图片请求很久没有完整报告
+
+图片链路会先调用 Qwen3.5-Omni 做观察，再检索概念、复核图片、检索规程并生成报告。前端应显示 `vision_observe`、`concept_search`、`vision_analyze`、`cypher_match`、`generating` 等步骤；如果只停在某一步，优先检查 DashScope 额度、模型名 `QWEN_VL_MODEL=qwen3.5-omni-plus`、后端日志和 SSE `error` 事件。
+
+### DashScope 免费额度或请求中断
+
+如果返回 `AllocationQuota.FreeTierOnly`，说明当前 DashScope 账号免费额度耗尽，需要在管理控制台关闭 free-tier-only 限制或更换可用 key。浏览器出现 `BodyStreamBuffer was aborted` 多半是长时间图片请求被前端或代理中断；当前前端图片请求和 SSE 已使用更长超时，仍可通过后端日志确认真实异常。

@@ -7,7 +7,8 @@ This repo is a coal-mine ventilation safety GraphRAG system. It now includes:
 - Python RAG core under `agent/rag_system/`
 - shared Neo4j/Milvus connection management in `agent/connection_manager.py`
 - deterministic Cypher template retrieval in `agent/rag_system/cypher_templates/`
-- two-stage Qwen2.5-VL image extraction in `agent/rag_system/ventilation_vision_extractor.py`
+- two-pass Qwen3.5-Omni image extraction with concept retrieval in `agent/rag_system/ventilation_vision_extractor.py`
+- ventilation concept lookup in `agent/rag_system/ventilation_concept_retriever.py`
 - Django API and SSE backend under `web_backend/`
 - Vue 3 + TypeScript + Pinia frontend under `frontend/`
 
@@ -74,8 +75,8 @@ npm run dev
 - RAG retrieval outputs should remain `langchain_core.documents.Document`.
 - `page_content` can contain Markdown; the frontend renders assistant messages with `markdown-it` and raw HTML disabled.
 - Django initializes `VentilationRAGPipeline` lazily through `web_backend/chat/pipeline_service.py`.
-- SSE endpoint must keep emitting `status`, `token`, `done`, or `error` events as plain Server-Sent Events.
-- Image upload flow is: Django temp file -> `VentilationRAGPipeline.query(image_path=...)` -> Qwen-VL extraction -> Cypher template retrieval -> hybrid fallback -> answer generation.
+- SSE endpoint emits plain Server-Sent Events. Text flows use `status`, `token`, `done`, `error`; image flows may also emit `step` events for the frontend agent timeline.
+- Image upload flow is: Django temp file -> `VentilationRAGPipeline.query(image_path=...)` -> Qwen3.5-Omni observation -> concept retrieval -> Qwen3.5-Omni analysis -> Cypher template retrieval -> hybrid fallback -> answer generation.
 
 ## Environment Variables
 

@@ -1,14 +1,15 @@
 # 煤矿通风隐患智能辨识系统
 
-本项目基于《煤矿安全规程》通风相关知识，构建 Neo4j 知识图谱、Milvus 向量索引和 GraphRAG 问答流水线，并提供 Django API 与 Vue3 对话前端。系统支持文字问答、SSE 流式输出，以及基于 Qwen2.5-VL 的现场图片隐患辨识入口。
+本项目基于《煤矿安全规程》通风相关知识，构建 Neo4j 知识图谱、Milvus 向量索引和 GraphRAG 问答流水线，并提供 Django API 与 Vue3 对话前端。系统支持文字问答、SSE 流式输出，以及基于 Qwen3.5-Omni 的现场图片隐患辨识入口。
 
 ## 当前能力
 
 - 图谱 + 向量混合检索，支持多跳 GraphRAG 推理。
 - Cypher 模板优先检索，适配通风场景的结构化字段。
-- Qwen2.5-VL 两阶段图片理解：场景分类 + 字段抽取。
+- Qwen3.5-Omni 图片理解：先初步观察并列出不确定概念，再检索通风概念定义，最后结合概念卡片完成场景、字段和风险分析。
 - Django REST/SSE API。
-- Vue3 + TypeScript + Pinia 前端，支持图片上传、流式回复和 Markdown 渲染。
+- Vue3 + TypeScript + Pinia 前端，支持图片上传、流式回复、Agent 步骤展示和 Markdown 渲染。
+- 图片辨识统一在会话窗口完成：上传图片后，用户描述会和图像一起进入 Qwen3.5-Omni + RAG 辨识链路。
 
 ## 目录速览
 
@@ -16,7 +17,7 @@
 ventilation-graph-rag/
 ├── agent/
 │   ├── data_pipeline/          # 规程知识抽取、CSV 构建、Neo4j 入库
-│   ├── rag_system/             # RAG 检索、生成、Cypher 模板、VL 集成
+│   ├── rag_system/             # RAG 检索、生成、Cypher 模板、VL/概念检索集成
 │   └── connection_manager.py    # Neo4j/Milvus 共享连接
 ├── web_backend/                 # Django API + SSE
 ├── frontend/                    # Vue3 对话前端
@@ -55,7 +56,7 @@ MILVUS_PORT=19530
 图片识别可额外配置：
 
 ```ini
-QWEN_VL_MODEL=qwen2.5-vl-72b-instruct
+QWEN_VL_MODEL=qwen3.5-omni-plus
 ```
 
 ### 3. 启动数据库
@@ -89,6 +90,8 @@ npm run dev
 
 打开 `http://127.0.0.1:5173`。
 
+图片辨识无需进入单独页面；在主会话窗口点击 `+` 上传图片，再输入现场描述或检查重点后发送即可。
+
 ## 常用验证
 
 ```powershell
@@ -97,6 +100,9 @@ D:\Miniconda\envs\ventilation-identify-system\python.exe agent\rag_system\test_v
 
 # VL 抽取逻辑测试（fake client，不依赖真实 Qwen-VL）
 D:\Miniconda\envs\ventilation-identify-system\python.exe agent\rag_system\test_ventilation_vision_extractor.py
+
+# 真实图片评估指标测试（fake pipeline，不依赖真实 Qwen-VL）
+D:\Miniconda\envs\ventilation-identify-system\python.exe web_backend\chat\test_vision_evaluation.py
 
 # 真实 CLI 问答
 D:\Miniconda\envs\ventilation-identify-system\python.exe agent\rag_system\ventilation_rag_pipeline.py -q "掘进中的岩巷最低风速要求是多少" --top-k 3
@@ -131,4 +137,3 @@ curl -N -X POST http://127.0.0.1:8000/api/chat/stream/ `
 - [docs/runbook.md](docs/runbook.md)：运行、验证、排障
 - [docs/status.md](docs/status.md)：当前状态和剩余风险
 - [docs/grill-me-interview/](docs/grill-me-interview/)：设计访谈、阶段计划和开发日志
-

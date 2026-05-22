@@ -32,11 +32,11 @@
   - 新增 `agent/rag_system/ventilation_cypher_templates.py`，负责模板加载、场景匹配、参数绑定、执行结果转 Document。
   - 验证：`test_ventilation_cypher_templates.py` 通过，确认模板匹配和 mock 执行结果包装正常。
 
-- **[Phase 3: Qwen2.5-VL 集成]** 已完成代码落地：
+- **[Phase 3: Qwen-VL 集成]** 已完成代码落地：
   - 新增 `agent/rag_system/ventilation_vision_extractor.py`，实现 Stage 1 场景分类与 Stage 2 schema 驱动字段抽取。
   - `VentilationRAGPipeline.query()` 新增 `image_path` 参数；图片入口固定执行 `VL 抽取 → Cypher 模板检索 → 向量兜底 → 生成答案`。
   - CLI 新增 `--image` 参数。
-  - 验证：`test_ventilation_vision_extractor.py` 使用 fake Qwen-VL client 通过，确认两阶段抽取和字段清洗正常。
+  - 验证：`test_ventilation_vision_extractor.py` 使用 fake Qwen-VL client 通过，确认初版两阶段抽取和字段清洗正常。
 
 - **[Phase 4: Django API + SSE]** 已完成代码落地：
   - 新增 `web_backend/` Django 项目结构。
@@ -67,4 +67,43 @@
 
 ### Next Steps
 - 启动 Django 与 Vite 开发服务器，做浏览器端对话、SSE 渲染和图片上传体验验证。
-- 接入真实 Qwen2.5-VL 服务和样图，验证图片隐患识别精度。
+- 接入真实 Qwen3.5-Omni 服务和样图，验证图片隐患识别精度。
+
+## Session 2026-05-22
+
+### Completed
+- **[真实图片识别精度验证]** 增加批量评估闭环：
+  - 新增 `web_backend/chat/vision_evaluation.py`，复用当前 `VentilationVisionExtractor`，对真实图片样本执行场景识别、字段抽取、Cypher 模板检索，并统计场景准确率、字段准确率、综合准确率、检索命中率。
+  - 新增 `GET /api/chat/vision/scenes/`，前端可读取场景 schema。
+  - 新增 `POST /api/chat/vision/evaluate/`，接收 `metadata` 和多张 `image_<index>` 图片，返回结构化明细与 Markdown 报告。
+  - 根据产品调整，前端不单独开放验证页面；用户侧图片辨识统一回到主会话窗口，通过“上传图片 + 输入现场描述/检查重点”触发。
+  - 新增 `web_backend/chat/test_vision_evaluation.py`，用 fake pipeline 验证指标计算逻辑。
+  - 更新 `docs/api.md`、`docs/status.md`、`README.md`。
+
+### Verification
+- `D:\Miniconda\envs\ventilation-identify-system\python.exe web_backend\chat\test_vision_evaluation.py` 通过。
+- `D:\Miniconda\envs\ventilation-identify-system\python.exe web_backend\manage.py check` 通过。
+- `npm run build` 通过。
+
+### Next Steps
+- 启动后端和前端，打开 `http://127.0.0.1:5173`。
+- 在会话窗口上传 3-5 张真实矿井通风样图，并输入现场描述/检查重点，观察图片分析和规程辨识报告。
+- 根据报告中不匹配的样本，调优 `ventilation_vision_extractor.py` prompt、`cypher_templates/scenes.json` 字段定义和 Cypher 模板。
+
+### Completed
+- **[VL 增强优化]** 根据 `docs/plan-vl-enhancement.md` 完成图片链路增强：
+  - 新增 `VentilationConceptRetriever`，支持从 Neo4j/Milvus/内置兜底概念检索通风概念定义卡片。
+  - `VentilationVisionExtractor` 从旧的两阶段抽取升级为“初步观察 -> 概念检索 -> 概念增强分析”。
+  - 图片流式链路新增 `step` 事件，前端展示初步观察、概念检索、图片复核、规程匹配、报告生成进度。
+  - 图片回答生成改为使用图片观察、结构化字段、风险等级、主要隐患、概念卡片和规程证据综合生成 Markdown 辨识报告。
+  - 文档已同步 `AGENTS.md`、`README.md`、`docs/architecture.md`、`docs/api.md`、`docs/runbook.md`、`docs/status.md`。
+
+### Verification
+- `D:\Miniconda\envs\ventilation-identify-system\python.exe web_backend\manage.py check` 通过。
+- `D:\Miniconda\envs\ventilation-identify-system\python.exe agent\rag_system\test_ventilation_vision_extractor.py` 通过。
+- `D:\Miniconda\envs\ventilation-identify-system\python.exe -m py_compile agent\rag_system\ventilation_rag_pipeline.py agent\rag_system\ventilation_generation.py agent\rag_system\ventilation_concept_retriever.py agent\rag_system\ventilation_vision_extractor.py web_backend\chat\views.py web_backend\chat\vision_evaluation.py` 通过。
+- `npm run build` 通过。
+
+### Next Steps
+- 用真实矿井通风样图验证增强后的图片会话链路，重点观察概念检索是否命中、风险等级是否稳定、规程证据是否贴合现场描述。
+- 若概念覆盖不足，执行 `agent/data_pipeline/build_concept_knowledge.py` 构建更完整的 `Concept` 节点与 `ventilation_concepts` 向量集合。

@@ -3,7 +3,7 @@
     <header class="header-section">
       <div>
         <h1>煤矿通风隐患智能辨识</h1>
-        <p>上传现场图像或输入检查项，生成规程依据明确的核合报告</p>
+        <p>上传现场图像并补充描述，系统会先分析图片和描述，再生成规程依据明确的辨识报告</p>
       </div>
       <label class="stream-switch">
         <input v-model="useStream" type="checkbox" />
@@ -40,15 +40,39 @@
           </span>
           <span class="timestamp">{{ formatTime(message.createdAt) }}</span>
         </div>
+
         <figure v-if="message.imageUrl" class="image-frame">
           <img class="message-image" :src="message.imageUrl" alt="上传的现场图片" />
           <figcaption v-if="message.sourceFileName">{{ message.sourceFileName }}</figcaption>
         </figure>
+
+        <div v-if="message.role === 'assistant' && message.steps?.length" class="agent-steps">
+          <button class="steps-summary" type="button" @click="toggleSteps(message.id)">
+            <span>{{ stepSummary(message) }}</span>
+            <span class="chevron">{{ collapsedSteps[message.id] ? '展开' : '收起' }}</span>
+          </button>
+          <ol v-if="!collapsedSteps[message.id]" class="step-list">
+            <li
+              v-for="step in message.steps"
+              :key="step.key"
+              class="step-item"
+              :class="step.status"
+            >
+              <span class="step-dot"></span>
+              <div>
+                <strong>{{ step.label }}</strong>
+                <p>{{ step.message }}</p>
+                <small v-if="stepMeta(step)">{{ stepMeta(step) }}</small>
+              </div>
+            </li>
+          </ol>
+        </div>
+
         <MarkdownRenderer
-          v-if="message.role === 'assistant' && message.content"
+          v-if="message.role === 'assistant' && message.content && hasReportContent(message)"
           :content="message.content"
         />
-        <div v-else class="ai-text">{{ message.content || '正在生成...' }}</div>
+        <div v-else class="ai-text">{{ message.content || message.currentStatus || '正在生成...' }}</div>
       </article>
     </div>
 
@@ -61,11 +85,7 @@
           <img :src="selectedPreview" alt="待上传图片" />
           <button type="button" title="移除图片" @click="clearImage">×</button>
         </div>
-        <input
-          v-model="inputText"
-          type="text"
-          placeholder="输入检查项，例如：这张图中的局部通风机距回风口是否合规"
-        />
+        <input v-model="inputText" type="text" :placeholder="inputPlaceholder" />
         <button class="send-btn" type="submit" :disabled="!canSend" title="发送">
           <span>➤</span>
         </button>
@@ -76,9 +96,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, reactive, ref, watch } from 'vue'
 import MarkdownRenderer from '@/components/MarkdownRenderer.vue'
-import { useChatStore, type ChatMessage } from '@/stores/chat'
+import { useChatStore, type AgentStep, type ChatMessage } from '@/stores/chat'
 
 const chat = useChatStore()
 const inputText = ref('')
@@ -87,8 +107,14 @@ const selectedPreview = ref('')
 const useStream = ref(true)
 const fileInput = ref<HTMLInputElement | null>(null)
 const messagesEl = ref<HTMLElement | null>(null)
+const collapsedSteps = reactive<Record<string, boolean>>({})
 
 const canSend = computed(() => (inputText.value.trim().length > 0 || selectedFile.value) && !chat.isSending)
+const inputPlaceholder = computed(() =>
+  selectedFile.value
+    ? '补充现场描述或检查重点，例如：局部通风机距回风口约 8 米'
+    : '输入检查项，或上传图片后补充现场描述',
+)
 
 watch(
   () => chat.activeConversation.messages.length,
@@ -133,4 +159,28 @@ const tagClass = (message: ChatMessage) => {
 
 const formatTime = (value: string) =>
   new Date(value).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+
+const toggleSteps = (messageId: string) => {
+  collapsedSteps[messageId] = !collapsedSteps[messageId]
+}
+
+const stepSummary = (message: ChatMessage) => {
+  const active = message.steps?.find((step) => step.status === 'active')
+  if (active) return active.message
+  const last = message.steps?.[message.steps.length - 1]
+  return last?.message || message.currentStatus || '正在处理'
+}
+
+const stepMeta = (step: AgentStep) => {
+  const data = step.data || {}
+  if (Array.isArray(data.concepts) && data.concepts.length) return `概念：${data.concepts.join('、')}`
+  if (typeof data.doc_count === 'number') return `命中条文：${data.doc_count}`
+  if (typeof data.scene_name === 'string') return `场景：${data.scene_name}`
+  return ''
+}
+
+const hasReportContent = (message: ChatMessage) => {
+  if (!message.steps?.length) return true
+  return message.content.trim() !== message.currentStatus?.trim()
+}
 </script>

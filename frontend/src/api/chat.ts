@@ -4,8 +4,15 @@ export type ChatResponse = {
   error?: string
 }
 
+export type StreamStepEvent = {
+  step: string
+  message: string
+  data?: Record<string, unknown>
+}
+
 export type StreamHandlers = {
   onStatus?: (message: string) => void
+  onStep?: (step: StreamStepEvent) => void
   onToken: (content: string) => void
   onError: (message: string) => void
   onDone: () => void
@@ -13,33 +20,45 @@ export type StreamHandlers = {
 
 const API_BASE = import.meta.env.VITE_API_BASE || ''
 const REQUEST_TIMEOUT_MS = 120_000
+const IMAGE_REQUEST_TIMEOUT_MS = 600_000
+const STREAM_TIMEOUT_MS = 1_800_000
 
 export async function sendTextMessage(question: string, topK = 5): Promise<string> {
-  const controller = createTimeoutController()
-  const response = await fetch(`${API_BASE}/api/chat/`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question, top_k: topK }),
-    signal: controller.signal,
-  })
-  controller.clear()
-  return parseAnswer(response)
+  const controller = createTimeoutController(REQUEST_TIMEOUT_MS)
+  try {
+    const response = await fetch(`${API_BASE}/api/chat/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question, top_k: topK }),
+      signal: controller.signal,
+    })
+    return parseAnswer(response)
+  } catch (exc) {
+    throw new Error(toFriendlyRequestError(exc, REQUEST_TIMEOUT_MS))
+  } finally {
+    controller.clear()
+  }
 }
 
 export async function sendImageMessage(question: string, image: File, topK = 5): Promise<string> {
-  const controller = createTimeoutController()
+  const controller = createTimeoutController(IMAGE_REQUEST_TIMEOUT_MS)
   const formData = new FormData()
   formData.append('question', question)
   formData.append('top_k', String(topK))
   formData.append('image', image)
 
-  const response = await fetch(`${API_BASE}/api/chat/upload/`, {
-    method: 'POST',
-    body: formData,
-    signal: controller.signal,
-  })
-  controller.clear()
-  return parseAnswer(response)
+  try {
+    const response = await fetch(`${API_BASE}/api/chat/upload/`, {
+      method: 'POST',
+      body: formData,
+      signal: controller.signal,
+    })
+    return parseAnswer(response)
+  } catch (exc) {
+    throw new Error(toFriendlyRequestError(exc, IMAGE_REQUEST_TIMEOUT_MS))
+  } finally {
+    controller.clear()
+  }
 }
 
 export async function streamMessage(
@@ -48,8 +67,8 @@ export async function streamMessage(
   handlers: StreamHandlers,
   topK = 5,
 ): Promise<void> {
-  const controller = createTimeoutController()
-  const init: RequestInit = { method: 'POST' }
+  const controller = createTimeoutController(STREAM_TIMEOUT_MS)
+  const init: RequestInit = { method: 'POST', signal: controller.signal }
 
   if (image) {
     const formData = new FormData()
@@ -61,8 +80,6 @@ export async function streamMessage(
     init.headers = { 'Content-Type': 'application/json' }
     init.body = JSON.stringify({ question, top_k: topK })
   }
-
-  init.signal = controller.signal
 
   try {
     const response = await fetch(`${API_BASE}/api/chat/stream/`, init)
@@ -88,13 +105,25 @@ export async function streamMessage(
     if (buffer.trim()) {
       dispatchSseEvent(buffer, handlers)
     }
+  } catch (exc) {
+    throw new Error(toFriendlyRequestError(exc, STREAM_TIMEOUT_MS))
   } finally {
     controller.clear()
   }
 }
 
 async function parseAnswer(response: Response): Promise<string> {
-  const payload = (await response.json()) as ChatResponse
+  const rawText = await response.text()
+  let payload: ChatResponse
+  try {
+    payload = JSON.parse(rawText) as ChatResponse
+  } catch {
+    if (!response.ok) {
+      throw new Error(rawText || `HTTP ${response.status}`)
+    }
+    throw new Error('后端返回了无法解析的响应')
+  }
+
   if (!response.ok || !payload.ok) {
     throw new Error(payload.error || `HTTP ${response.status}`)
   }
@@ -102,33 +131,60 @@ async function parseAnswer(response: Response): Promise<string> {
 }
 
 function dispatchSseEvent(eventText: string, handlers: StreamHandlers) {
-  const eventLine = eventText.split('\n').find((line) => line.startsWith('event:'))
-  const dataLines = eventText
-    .split('\n')
+  const lines = eventText.split('\n')
+  const eventLine = lines.find((line) => line.startsWith('event:'))
+  const dataLines = lines
     .filter((line) => line.startsWith('data:'))
     .map((line) => line.replace('data:', '').trim())
   const event = eventLine?.replace('event:', '').trim() || 'message'
   const rawData = dataLines.join('\n') || '{}'
 
-  let data: Record<string, string> = {}
+  let data: Record<string, unknown> = {}
   try {
-    data = JSON.parse(rawData)
+    data = JSON.parse(rawData) as Record<string, unknown>
   } catch {
     data = { content: rawData }
   }
 
-  if (event === 'token') handlers.onToken(data.content || '')
-  if (event === 'status') handlers.onStatus?.(data.message || '')
+  if (event === 'token') handlers.onToken(String(data.content || ''))
+  if (event === 'status') handlers.onStatus?.(String(data.message || ''))
+  if (event === 'step') {
+    handlers.onStep?.({
+      step: String(data.step || 'step'),
+      message: String(data.message || ''),
+      data: (data.data as Record<string, unknown> | undefined) || {},
+    })
+  }
   if (event === 'error') {
-    handlers.onError(data.message || '流式响应失败')
+    handlers.onError(String(data.message || '流式响应失败'))
     handlers.onDone()
   }
   if (event === 'done') handlers.onDone()
 }
 
-function createTimeoutController() {
+function toFriendlyRequestError(exc: unknown, timeoutMs: number) {
+  const message = exc instanceof Error ? exc.message : String(exc || '')
+  const lowerMessage = message.toLowerCase()
+  const isAbort =
+    (exc instanceof DOMException && exc.name === 'AbortError') ||
+    lowerMessage.includes('aborted') ||
+    lowerMessage.includes('bodystreambuffer')
+
+  if (isAbort) {
+    const minutes = Math.round(timeoutMs / 60_000)
+    return `请求超时或被浏览器中止：已等待约 ${minutes} 分钟。图片识别可能仍在后端处理中，请确认后端服务、DashScope 额度和模型配置后重试。`
+  }
+
+  if (lowerMessage.includes('failed to fetch') || lowerMessage.includes('networkerror')) {
+    return '无法连接后端服务：请确认 Django 服务正在 http://127.0.0.1:8000 运行。'
+  }
+
+  return message || '请求失败'
+}
+
+function createTimeoutController(timeoutMs = REQUEST_TIMEOUT_MS) {
   const controller = new AbortController()
-  const timer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs)
   return {
     signal: controller.signal,
     clear: () => window.clearTimeout(timer),
