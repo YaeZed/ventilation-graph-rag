@@ -61,6 +61,9 @@ D:\Miniconda\envs\ventilation-identify-system\python.exe agent\rag_system\ventil
 D:\Miniconda\envs\ventilation-identify-system\python.exe agent\rag_system\test_ventilation_cypher_templates.py
 D:\Miniconda\envs\ventilation-identify-system\python.exe agent\rag_system\test_ventilation_vision_extractor.py
 
+# Build or refresh the concept knowledge layer
+D:\Miniconda\envs\ventilation-identify-system\python.exe agent\data_pipeline\build_concept_knowledge.py
+
 # Frontend
 cd frontend
 npm install
@@ -77,6 +80,8 @@ npm run dev
 - Django initializes `VentilationRAGPipeline` lazily through `web_backend/chat/pipeline_service.py`.
 - SSE endpoint emits plain Server-Sent Events. Text flows use `status`, `token`, `done`, `error`; image flows may also emit `step` events for the frontend agent timeline.
 - Image upload flow is: Django temp file -> `VentilationRAGPipeline.query(image_path=...)` -> Qwen3.5-Omni observation -> concept retrieval -> Qwen3.5-Omni analysis -> Cypher template retrieval -> hybrid fallback -> answer generation.
+- Concept knowledge build flow is: create Neo4j `Concept` nodes, then populate Milvus collection `ventilation_concepts`. If `Concept` nodes already exist, `build_concept_knowledge.py` skips LLM generation and refreshes Milvus from Neo4j.
+- Frontend conversation isolation is intentional: sending state, SSE message updates, input drafts, and pending image previews are keyed by `conversationId`.
 
 ## Environment Variables
 
@@ -97,5 +102,6 @@ npm run dev
 - PowerShell may render Chinese or symbols as mojibake; verify API strings with UTF-8 or `unicode_escape` before assuming backend corruption.
 - `node` inside the Codex app sandbox may be denied. Escalated shell access has used system Node `v20.19.5` and npm `10.8.2`.
 - Frontend SSE must update messages through the reactive Pinia store. Updating a stale object reference can leave the UI stuck at "正在生成...".
+- Frontend streaming callbacks must update messages by captured `conversationId`; using the current active conversation can break replies after the user switches chats.
 - `frontend/node_modules/` and `frontend/dist/` are generated and ignored.
 - `.env`, local model files, Docker volumes, `.hf-cache/`, and `.codex_runtime/` are not source artifacts.

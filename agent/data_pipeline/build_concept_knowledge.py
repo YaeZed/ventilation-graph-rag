@@ -121,7 +121,9 @@ class ConceptKnowledgeBuilder:
 
         existing = self._count_concepts()
         if existing > 0:
-            logger.info("Concept 节点已存在 %s 个，跳过构建（使用 --force 强制重建）", existing)
+            entries = self._load_concepts_from_neo4j()
+            logger.info("Concept 节点已存在 %s 个，跳过 LLM 生成，刷新 Milvus 向量集合", existing)
+            self._store_to_milvus(entries)
             return existing
 
         concept_names = self._extract_concept_names()
@@ -147,6 +149,36 @@ class ConceptKnowledgeBuilder:
             result = session.run("MATCH (c:Concept) RETURN count(c) AS cnt")
             record = result.single()
             return record["cnt"] if record else 0
+
+    def _load_concepts_from_neo4j(self) -> List[ConceptEntry]:
+        with self.driver.session() as session:
+            result = session.run(
+                """
+                MATCH (c:Concept)
+                RETURN c.name AS name,
+                       c.aliases AS aliases,
+                       c.definition AS definition,
+                       c.identification_features AS identification_features,
+                       c.visual_clues AS visual_clues,
+                       c.typical_scenarios AS typical_scenarios,
+                       c.hazard_significance AS hazard_significance,
+                       c.related_regulation_articles AS related_regulation_articles
+                ORDER BY c.name
+                """
+            )
+            entries = []
+            for record in result:
+                entries.append(ConceptEntry(
+                    name=self._as_text(record["name"]),
+                    aliases=self._as_list(record["aliases"]),
+                    definition=self._as_text(record["definition"]),
+                    identification_features=self._as_text(record["identification_features"]),
+                    visual_clues=self._as_text(record["visual_clues"]),
+                    typical_scenarios=self._as_text(record["typical_scenarios"]),
+                    hazard_significance=self._as_text(record["hazard_significance"]),
+                    related_regulation_articles=self._as_list(record["related_regulation_articles"]),
+                ))
+            return entries
 
     def _extract_concept_names(self) -> Dict[str, Dict[str, Any]]:
         """Collect concept names from existing nodes and LLM article scan."""
@@ -217,14 +249,14 @@ class ConceptKnowledgeBuilder:
                 )
                 data = self._parse_json(response.choices[0].message.content)
                 entries.append(ConceptEntry(
-                    name=data.get("name", name),
-                    aliases=data.get("aliases") or [],
-                    definition=data.get("definition") or "",
-                    identification_features=data.get("identification_features") or "",
-                    visual_clues=data.get("visual_clues") or "",
-                    typical_scenarios=data.get("typical_scenarios") or "",
-                    hazard_significance=data.get("hazard_significance") or "",
-                    related_regulation_articles=data.get("related_regulation_articles") or [],
+                    name=self._as_text(data.get("name", name)),
+                    aliases=self._as_list(data.get("aliases")),
+                    definition=self._as_text(data.get("definition")),
+                    identification_features=self._as_text(data.get("identification_features")),
+                    visual_clues=self._as_text(data.get("visual_clues")),
+                    typical_scenarios=self._as_text(data.get("typical_scenarios")),
+                    hazard_significance=self._as_text(data.get("hazard_significance")),
+                    related_regulation_articles=self._as_list(data.get("related_regulation_articles")),
                 ))
                 logger.info("  ✓ %s", name)
             except Exception as exc:
@@ -286,7 +318,8 @@ class ConceptKnowledgeBuilder:
         except Exception:
             pass
 
-        if has_collection and self.force:
+        if has_collection:
+            logger.info("Milvus collection %s 已存在，删除后重建以避免重复向量", collection_name)
             client.drop_collection(collection_name)
             has_collection = False
 
@@ -302,10 +335,16 @@ class ConceptKnowledgeBuilder:
                 FieldSchema(name="identification_features", dtype=DataType.VARCHAR, max_length=2048),
             ]
             schema = CollectionSchema(fields, description="Ventilation safety concept dictionary")
+            index_params = client.prepare_index_params()
+            index_params.add_index(
+                field_name="vector",
+                index_type="AUTOINDEX",
+                metric_type="COSINE",
+            )
             client.create_collection(
                 collection_name=collection_name,
                 schema=schema,
-                index_params={"metric_type": "COSINE", "index_type": "AUTOINDEX"},
+                index_params=index_params,
             )
             client.load_collection(collection_name)
 
@@ -330,7 +369,32 @@ class ConceptKnowledgeBuilder:
 
         if data:
             client.insert(collection_name=collection_name, data=data)
+            try:
+                client.flush(collection_name)
+            except Exception:
+                pass
+            client.load_collection(collection_name)
             logger.info("已向量化并存入 Milvus (%s 个概念)", len(data))
+
+    def _as_text(self, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (list, tuple, set)):
+            return "\n".join(self._as_text(item) for item in value if item is not None)
+        if isinstance(value, dict):
+            return json.dumps(value, ensure_ascii=False)
+        return str(value)
+
+    def _as_list(self, value: Any) -> List[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value] if value.strip() else []
+        if isinstance(value, (list, tuple, set)):
+            return [self._as_text(item) for item in value if self._as_text(item)]
+        return [self._as_text(value)]
 
     def _parse_json(self, content: str) -> Dict[str, Any]:
         text = content.strip()

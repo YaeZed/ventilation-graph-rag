@@ -67,10 +67,11 @@ export const useChatStore = defineStore('chat', () => {
   }
   const conversations = ref<Conversation[]>([initialConversation])
   const activeId = ref(initialConversation.id)
-  const isSending = ref(false)
+  const sendingByConversation = ref<Record<string, boolean>>({})
   const error = ref('')
 
   const activeConversation = computed<Conversation>(() => ensureActiveConversation())
+  const isSending = computed(() => Boolean(sendingByConversation.value[activeId.value]))
 
   function ensureActiveConversation(): Conversation {
     const existing = conversations.value.find((item) => item.id === activeId.value)
@@ -110,19 +111,23 @@ export const useChatStore = defineStore('chat', () => {
 
   async function submit(question: string, image: File | null, useStream: boolean) {
     if (!question.trim() && !image) return
-    isSending.value = true
+    const conversation = ensureActiveConversation()
+    const conversationId = conversation.id
+    if (sendingByConversation.value[conversationId]) return
+
+    setConversationSending(conversationId, true)
     error.value = ''
 
     const imageUrl = image ? URL.createObjectURL(image) : undefined
     const userMessage = appendMessage(
+      conversationId,
       'user',
       question || '请判断图片中的通风安全隐患',
       imageUrl,
       'done',
       image?.name,
     )
-    const assistantMessage = appendMessage('assistant', '', undefined, 'streaming')
-    const conversation = ensureActiveConversation()
+    const assistantMessage = appendMessage(conversationId, 'assistant', '', undefined, 'streaming')
     let hasReceivedToken = false
 
     try {
@@ -130,7 +135,7 @@ export const useChatStore = defineStore('chat', () => {
       if (useStream) {
         await streamMessage(userMessage.content, image, {
           onStatus(message) {
-            const current = findMessage(assistantMessage.id)
+            const current = findMessage(conversationId, assistantMessage.id)
             if (!current) return
             current.currentStatus = normalizeStatusMessage(message)
             if (!hasReceivedToken && !current.steps?.length) {
@@ -138,10 +143,10 @@ export const useChatStore = defineStore('chat', () => {
             }
           },
           onStep(step) {
-            applyStep(assistantMessage.id, step)
+            applyStep(conversationId, assistantMessage.id, step)
           },
           onToken(content) {
-            const current = findMessage(assistantMessage.id)
+            const current = findMessage(conversationId, assistantMessage.id)
             if (!current) return
             if (!hasReceivedToken) {
               current.content = ''
@@ -152,24 +157,24 @@ export const useChatStore = defineStore('chat', () => {
             current.status = 'streaming'
           },
           onError(message) {
-            const current = findMessage(assistantMessage.id)
+            const current = findMessage(conversationId, assistantMessage.id)
             if (current?.steps) {
               current.steps.forEach((step) => {
                 if (step.status === 'active') step.status = 'error'
               })
             }
-            updateMessage(assistantMessage.id, { content: message, status: 'error' })
+            updateMessage(conversationId, assistantMessage.id, { content: message, status: 'error' })
             error.value = message
           },
           onDone() {
-            const current = findMessage(assistantMessage.id)
+            const current = findMessage(conversationId, assistantMessage.id)
             if (!current || current.status === 'error') return
             markActiveStepsDone(current)
             if (!current.content.trim()) current.content = '未收到有效回答'
             current.status = 'done'
           },
         })
-        const current = findMessage(assistantMessage.id)
+        const current = findMessage(conversationId, assistantMessage.id)
         if (current?.status === 'streaming') {
           markActiveStepsDone(current)
           current.status = 'done'
@@ -178,19 +183,20 @@ export const useChatStore = defineStore('chat', () => {
         const answer = image
           ? await sendImageMessage(userMessage.content, image)
           : await sendTextMessage(userMessage.content)
-        updateMessage(assistantMessage.id, { content: answer, status: 'done' })
+        updateMessage(conversationId, assistantMessage.id, { content: answer, status: 'done' })
       }
     } catch (exc) {
       const message = exc instanceof Error ? exc.message : '请求失败'
-      updateMessage(assistantMessage.id, { content: message, status: 'error' })
+      updateMessage(conversationId, assistantMessage.id, { content: message, status: 'error' })
       error.value = message
     } finally {
       conversation.updatedAt = new Date().toISOString()
-      isSending.value = false
+      setConversationSending(conversationId, false)
     }
   }
 
   function appendMessage(
+    conversationId: string,
     role: MessageRole,
     content: string,
     imageUrl?: string,
@@ -206,24 +212,32 @@ export const useChatStore = defineStore('chat', () => {
       createdAt: new Date().toISOString(),
       status,
     }
-    const conversation = ensureActiveConversation()
+    const conversation = findConversation(conversationId) || ensureActiveConversation()
     conversation.messages.push(message)
     conversation.updatedAt = new Date().toISOString()
     return conversation.messages[conversation.messages.length - 1]!
   }
 
-  function findMessage(id: string): ChatMessage | undefined {
-    return ensureActiveConversation().messages.find((message) => message.id === id)
+  function findConversation(id: string): Conversation | undefined {
+    return conversations.value.find((conversation) => conversation.id === id)
   }
 
-  function updateMessage(id: string, updates: Partial<Pick<ChatMessage, 'content' | 'status'>>) {
-    const message = findMessage(id)
+  function findMessage(conversationId: string, id: string): ChatMessage | undefined {
+    return findConversation(conversationId)?.messages.find((message) => message.id === id)
+  }
+
+  function updateMessage(
+    conversationId: string,
+    id: string,
+    updates: Partial<Pick<ChatMessage, 'content' | 'status'>>,
+  ) {
+    const message = findMessage(conversationId, id)
     if (!message) return
     Object.assign(message, updates)
   }
 
-  function applyStep(messageId: string, event: StreamStepEvent) {
-    const message = findMessage(messageId)
+  function applyStep(conversationId: string, messageId: string, event: StreamStepEvent) {
+    const message = findMessage(conversationId, messageId)
     if (!message) return
     if (!message.steps) message.steps = []
 
@@ -258,6 +272,20 @@ export const useChatStore = defineStore('chat', () => {
     }
     message.currentStatus = event.message
     message.status = 'streaming'
+  }
+
+  function setConversationSending(conversationId: string, value: boolean) {
+    if (value) {
+      sendingByConversation.value = {
+        ...sendingByConversation.value,
+        [conversationId]: true,
+      }
+      return
+    }
+
+    const next = { ...sendingByConversation.value }
+    delete next[conversationId]
+    sendingByConversation.value = next
   }
 
   function markActiveStepsDone(message: ChatMessage) {

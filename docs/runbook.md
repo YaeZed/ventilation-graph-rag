@@ -89,6 +89,27 @@ npm run dev
 
 打开 `http://127.0.0.1:5173`。
 
+## 构建概念知识层
+
+图片链路会优先检索 Neo4j `Concept` 和 Milvus `ventilation_concepts` 中的概念卡片。构建命令：
+
+```powershell
+D:\Miniconda\envs\ventilation-identify-system\python.exe agent\data_pipeline\build_concept_knowledge.py
+```
+
+脚本行为：
+
+- 如果 Neo4j 没有 `Concept` 节点，会从图谱条文/参数/设施提取候选概念，调用 Qwen 生成定义、视觉线索、识别特征，并写入 Neo4j 与 Milvus。
+- 如果 Neo4j 已有 `Concept` 节点，会跳过 LLM 生成，直接从 Neo4j 读取概念并刷新 Milvus 的 `ventilation_concepts` 集合。
+- `--force` 会删除旧 `Concept` 节点并重新生成，会重新消耗 DashScope 额度。
+
+Neo4j 验证：
+
+```cypher
+MATCH (c:Concept) RETURN count(c) AS total;
+MATCH (c:Concept) RETURN c.name, c.definition, c.visual_clues LIMIT 10;
+```
+
 ## 前端构建
 
 ```powershell
@@ -121,6 +142,14 @@ Codex 沙箱中可能无法直接执行 WindowsApps 下的 `node.exe`。用系�
 ### 第一次请求较慢
 
 Django pipeline 是懒加载。第一次请求会初始化 RAG、连接 Neo4j/Milvus、加载嵌入模型和索引，后续请求复用同一实例。
+
+### 多个会话互相影响
+
+前端应按 `conversationId` 隔离发送状态、SSE 回写、输入框草稿和待上传图片预览。若出现 A 会话生成中导致 B 会话不能发送，或切换会话后回复写错窗口，优先检查 `frontend/src/stores/chat.ts` 的 `sendingByConversation` 和回调里的 `conversationId`，以及 `frontend/src/views/HomeView.vue` 的 `drafts`。
+
+### 概念构建写入 Milvus 报错
+
+当前 `pymilvus` 版本需要用 `client.prepare_index_params()` 创建 index 参数，不能传普通 dict。若从 Neo4j 读出的概念字段是列表或字典，脚本会先归一化为字符串再向量化；不要把 `_as_text()` / `_as_list()` 去掉。
 
 ### 图片请求很久没有完整报告
 

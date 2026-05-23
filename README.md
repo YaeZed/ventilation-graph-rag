@@ -8,7 +8,7 @@
 - Cypher 模板优先检索，适配通风场景的结构化字段。
 - Qwen3.5-Omni 图片理解：先初步观察并列出不确定概念，再检索通风概念定义，最后结合概念卡片完成场景、字段和风险分析。
 - Django REST/SSE API。
-- Vue3 + TypeScript + Pinia 前端，支持图片上传、流式回复、Agent 步骤展示和 Markdown 渲染。
+- Vue3 + TypeScript + Pinia 前端，支持图片上传、流式回复、Agent 步骤展示、Markdown 渲染和会话级输入草稿隔离。
 - 图片辨识统一在会话窗口完成：上传图片后，用户描述会和图像一起进入 Qwen3.5-Omni + RAG 辨识链路。
 
 ## 目录速览
@@ -92,6 +92,16 @@ npm run dev
 
 图片辨识无需进入单独页面；在主会话窗口点击 `+` 上传图片，再输入现场描述或检查重点后发送即可。
 
+### 6. 概念知识层
+
+如需让图片链路使用更完整的概念卡片，构建或刷新 `Concept` 节点与 `ventilation_concepts` 向量集合：
+
+```powershell
+D:\Miniconda\envs\ventilation-identify-system\python.exe agent\data_pipeline\build_concept_knowledge.py
+```
+
+如果 Neo4j 已经有 `Concept` 节点，脚本会跳过 LLM 生成，直接从 Neo4j 读取并刷新 Milvus，避免重复消耗 DashScope 额度。
+
 ## 常用验证
 
 ```powershell
@@ -103,6 +113,9 @@ D:\Miniconda\envs\ventilation-identify-system\python.exe agent\rag_system\test_v
 
 # 真实图片评估指标测试（fake pipeline，不依赖真实 Qwen-VL）
 D:\Miniconda\envs\ventilation-identify-system\python.exe web_backend\chat\test_vision_evaluation.py
+
+# 概念构建脚本语法检查
+D:\Miniconda\envs\ventilation-identify-system\python.exe -m py_compile agent\data_pipeline\build_concept_knowledge.py
 
 # 真实 CLI 问答
 D:\Miniconda\envs\ventilation-identify-system\python.exe agent\rag_system\ventilation_rag_pipeline.py -q "掘进中的岩巷最低风速要求是多少" --top-k 3

@@ -107,3 +107,18 @@
 ### Next Steps
 - 用真实矿井通风样图验证增强后的图片会话链路，重点观察概念检索是否命中、风险等级是否稳定、规程证据是否贴合现场描述。
 - 若概念覆盖不足，执行 `agent/data_pipeline/build_concept_knowledge.py` 构建更完整的 `Concept` 节点与 `ventilation_concepts` 向量集合。
+
+### Completed
+- **[概念知识层构建修复]** `build_concept_knowledge.py` 已适配当前 `pymilvus`：
+  - Milvus index 参数改为 `client.prepare_index_params()`。
+  - Neo4j 已有 `Concept` 时跳过 LLM 生成，直接从 Neo4j 读取概念并刷新 `ventilation_concepts`。
+  - 对列表/字典字段执行文本归一化，避免向量化时报 `expected str instance, list found`。
+- **[前端多会话隔离修复]** 解决一个会话生成中阻塞其他会话的问题：
+  - `chat.ts` 将发送状态和 SSE 回写绑定到 `conversationId`。
+  - `HomeView.vue` 将输入框草稿、待上传图片和预览 URL 按会话隔离。
+  - 同一会话内仍阻止重复发送，跨会话可并行发起请求。
+
+### Verification
+- `D:\Miniconda\envs\ventilation-identify-system\python.exe -m py_compile agent\data_pipeline\build_concept_knowledge.py` 通过。
+- `D:\Miniconda\envs\ventilation-identify-system\python.exe -c "from agent.data_pipeline.build_concept_knowledge import ConceptKnowledgeBuilder; b=ConceptKnowledgeBuilder(); print(b._count_concepts())"` 返回 `345`。
+- `npm run build` 通过。

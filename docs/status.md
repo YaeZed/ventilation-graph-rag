@@ -25,6 +25,7 @@
   - SSE 流式输出
   - Markdown 渲染
   - 会话列表
+- 前端会话隔离已覆盖发送状态、SSE 回写、输入框草稿和待上传图片预览；一个会话生成中不应阻塞其他会话发起请求。
 - 图片流式辨识已显示 Agent 步骤：初步观察、概念检索、概念增强分析、规程模板匹配、报告生成。
 - 新增真实图片识别精度验证功能：
   - `GET /api/chat/vision/scenes/` 返回可标注场景和字段 schema。
@@ -46,12 +47,13 @@
 - 图片 `POST /api/chat/stream/` 额外返回 `step` SSE 事件，前端可渲染处理进度。
 - Vite 代理 `/api/chat/stream/` 到 Django 后端可正常流式返回 token。
 - 视觉评估指标逻辑 `web_backend/chat/test_vision_evaluation.py` 通过 fake pipeline 烟测。
+- 概念知识层脚本支持 Neo4j 已有 `Concept` 时跳过 LLM 生成并刷新 Milvus `ventilation_concepts`。
 - `npm run build` 通过。
 
 ## 剩余风险
 
 - 真实图片识别最终准确率仍取决于 Qwen3.5-Omni 服务、现场样图质量、概念知识覆盖度和用户提供的现场描述质量。
-- 概念知识层目前可使用内置兜底概念；若要扩大覆盖面，需要执行 `agent/data_pipeline/build_concept_knowledge.py` 并确认 Neo4j `Concept` 与 Milvus `ventilation_concepts` 数据已入库。
+- 概念知识层目前已支持脚本化构建/刷新；实际图片准确率仍需确认 Neo4j `Concept` 和 Milvus `ventilation_concepts` 的数据质量。
 - Celery/Redis 目前只是离线任务预留，在线问答链路不依赖 Celery。
 - 生产部署尚未配置 ASGI/WSGI 服务、反向代理、静态资源托管和鉴权。
 - 本地 `.env` 可能覆盖示例配置；排查时以当前 `.env` 和运行日志中的 Milvus collection 为准。

@@ -16,13 +16,13 @@
         <div class="empty-icon">+</div>
         <p>上传局部通风机、风筒、风门或巷道风速场景图片</p>
         <div class="sample-prompts">
-          <button type="button" @click="inputText = '检查图片中的局部通风机安装是否合规'">
+          <button type="button" @click="activeDraft.text = '检查图片中的局部通风机安装是否合规'">
             局部通风机安装
           </button>
-          <button type="button" @click="inputText = '判断掘进工作面风筒与通风状态是否存在隐患'">
+          <button type="button" @click="activeDraft.text = '判断掘进工作面风筒与通风状态是否存在隐患'">
             掘进工作面通风
           </button>
-          <button type="button" @click="inputText = '这处风门设施是否满足规程要求'">
+          <button type="button" @click="activeDraft.text = '这处风门设施是否满足规程要求'">
             风门设施核查
           </button>
         </div>
@@ -81,11 +81,11 @@
         <button class="upload-btn" type="button" title="上传图片" @click="openFilePicker">
           <span>+</span>
         </button>
-        <div v-if="selectedPreview" class="image-pill">
-          <img :src="selectedPreview" alt="待上传图片" />
+        <div v-if="activeDraft.preview" class="image-pill">
+          <img :src="activeDraft.preview" alt="待上传图片" />
           <button type="button" title="移除图片" @click="clearImage">×</button>
         </div>
-        <input v-model="inputText" type="text" :placeholder="inputPlaceholder" />
+        <input v-model="activeDraft.text" type="text" :placeholder="inputPlaceholder" />
         <button class="send-btn" type="submit" :disabled="!canSend" title="发送">
           <span>➤</span>
         </button>
@@ -96,22 +96,29 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import MarkdownRenderer from '@/components/MarkdownRenderer.vue'
 import { useChatStore, type AgentStep, type ChatMessage } from '@/stores/chat'
 
+type InputDraft = {
+  text: string
+  file: File | null
+  preview: string
+}
+
 const chat = useChatStore()
-const inputText = ref('')
-const selectedFile = ref<File | null>(null)
-const selectedPreview = ref('')
+const drafts = reactive<Record<string, InputDraft>>({})
 const useStream = ref(true)
 const fileInput = ref<HTMLInputElement | null>(null)
 const messagesEl = ref<HTMLElement | null>(null)
 const collapsedSteps = reactive<Record<string, boolean>>({})
 
-const canSend = computed(() => (inputText.value.trim().length > 0 || selectedFile.value) && !chat.isSending)
+const activeDraft = computed(() => getDraft(chat.activeId))
+const canSend = computed(
+  () => (activeDraft.value.text.trim().length > 0 || activeDraft.value.file) && !chat.isSending,
+)
 const inputPlaceholder = computed(() =>
-  selectedFile.value
+  activeDraft.value.file
     ? '补充现场描述或检查重点，例如：局部通风机距回风口约 8 米'
     : '输入检查项，或上传图片后补充现场描述',
 )
@@ -126,30 +133,51 @@ watch(
 
 const openFilePicker = () => fileInput.value?.click()
 
+const getDraft = (conversationId: string) => {
+  if (!drafts[conversationId]) {
+    drafts[conversationId] = {
+      text: '',
+      file: null,
+      preview: '',
+    }
+  }
+  return drafts[conversationId]
+}
+
 const handleFileChange = (event: Event) => {
   const target = event.target as HTMLInputElement
   const file = target.files?.[0]
   if (!file) return
-  if (selectedPreview.value) URL.revokeObjectURL(selectedPreview.value)
-  selectedFile.value = file
-  selectedPreview.value = URL.createObjectURL(file)
+  const draft = activeDraft.value
+  if (draft.preview) URL.revokeObjectURL(draft.preview)
+  draft.file = file
+  draft.preview = URL.createObjectURL(file)
+  target.value = ''
 }
 
 const clearImage = () => {
-  if (selectedPreview.value) URL.revokeObjectURL(selectedPreview.value)
-  selectedFile.value = null
-  selectedPreview.value = ''
+  const draft = activeDraft.value
+  if (draft.preview) URL.revokeObjectURL(draft.preview)
+  draft.file = null
+  draft.preview = ''
   if (fileInput.value) fileInput.value.value = ''
 }
 
 const submit = async () => {
   if (!canSend.value) return
-  const question = inputText.value.trim()
-  const image = selectedFile.value
-  inputText.value = ''
+  const draft = activeDraft.value
+  const question = draft.text.trim()
+  const image = draft.file
+  draft.text = ''
   clearImage()
   await chat.submit(question, image, useStream.value)
 }
+
+onBeforeUnmount(() => {
+  Object.values(drafts).forEach((draft) => {
+    if (draft.preview) URL.revokeObjectURL(draft.preview)
+  })
+})
 
 const tagClass = (message: ChatMessage) => {
   if (message.status === 'error') return 'danger'
