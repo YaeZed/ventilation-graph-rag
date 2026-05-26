@@ -71,3 +71,23 @@ Django 不在 app 启动时立即加载 RAG，而是通过 `web_backend/chat/pip
 前端用 Vite 代理 `/api` 到 `127.0.0.1:8000`。助手消息使用 `markdown-it` 渲染 Markdown，并关闭原始 HTML。
 
 图片流式请求除 `status`、`token`、`done`、`error` 外，还会接收 `step` 事件。前端将 `vision_observe`、`concept_search`、`vision_analyze`、`cypher_match`、`generating` 显示为可折叠 Agent 步骤，避免长时间图片分析时用户只看到静态“正在生成”。
+
+## 前端用户模块
+
+前端路由由 `frontend/src/router/index.ts` 管理：
+
+| 路由 | 作用 |
+|---|---|
+| `/` | 重定向到 `/chat` |
+| `/chat` | 主辨识对话页 |
+| `/chat/:conversationId` | 指定会话页 |
+| `/stats` | 本地会话统计和 JSON 导出 |
+| `/settings` | 本地偏好设置 |
+
+用户层状态集中在 `frontend/src/stores/chat.ts`。Pinia store 管理 `Conversation` 列表、当前会话、发送状态、搜索词、简易用户身份、偏好设置和账号同步状态。持久化采用账号作用域 key：游客写入 `localStorage` key `ventilation-graph-rag:user-module:v2:guest`，登录用户写入 `ventilation-graph-rag:user-module:v2:user:<userId>`，旧 `ventilation-graph-rag:user-module:v1` 仅作为游客迁移兼容。未登录时保持本地优先；已有账号登录只加载该账号本地缓存和后端会话，注册新账号时才把游客本地会话迁移到账号。发送状态、SSE 回写、输入草稿和待上传图片预览都按 `conversationId` 隔离。
+
+后端用户模块位于 `web_backend/users/`，使用 Django 内置 `User` 和 session 登录。`UserProfile` 保存昵称、头像文字和偏好设置，`ConversationRecord` 以 `(user, client_id)` 唯一约束保存前端会话快照、归档状态、元数据和消息 JSON。当前实现面向本地开发和演示，生产部署前应补充更严格的鉴权、CSRF/CORS 和 cookie 配置。
+
+侧边栏由 `Sidebar.vue`、`ConversationList.vue`、`ConversationItem.vue`、`UserMiniCard.vue` 等组件组成。它采用浅色 Gemini 风格：收缩态为图标轨，展开态包含新建对话、搜索、统计入口、未归档对话列表、可展开/收起的归档区、偏好设置和用户头像。单个会话的三点菜单支持分享、归档、重命名、导出 PDF 和删除。
+
+导出能力全部在浏览器侧完成：单会话 PDF 通过新窗口打印生成，助手 Markdown 会先用 `markdown-it` 渲染为排版后的 HTML；全量记录通过 JSON blob 下载。上传图片会先转换并压缩为 data URL，便于刷新后保留预览和导出内容；若 `localStorage` 容量不足，保存逻辑会自动降级为不保存图片内容。下一阶段优先将图片改为后端附件引用，减少 localStorage 和会话快照体积。

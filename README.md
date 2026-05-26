@@ -7,8 +7,9 @@
 - 图谱 + 向量混合检索，支持多跳 GraphRAG 推理。
 - Cypher 模板优先检索，适配通风场景的结构化字段。
 - Qwen3.5-Omni 图片理解：先初步观察并列出不确定概念，再检索通风概念定义，最后结合概念卡片完成场景、字段和风险分析。
-- Django REST/SSE API。
-- Vue3 + TypeScript + Pinia 前端，支持图片上传、流式回复、Agent 步骤展示、Markdown 渲染和会话级输入草稿隔离。
+- Django REST/SSE API，包含开发期账号、用户资料和会话同步接口。
+- Vue3 + TypeScript + Pinia 前端，支持图片上传、流式回复、Agent 步骤展示、Markdown 渲染、多会话管理、搜索、归档、登录/注册、导出和会话级输入草稿隔离。
+- 前端用户层本地优先：未登录时使用浏览器 localStorage 保存会话、偏好设置和简易用户身份；登录用户按账号隔离本地缓存并同步到 Django 后端。已有账号登录只加载该账号数据，注册新账号时才迁移游客会话。上传图片会压缩为 data URL 用于刷新后预览和报告导出，容量不足时自动降级为仅保存文本记录。
 - 图片辨识统一在会话窗口完成：上传图片后，用户描述会和图像一起进入 Qwen3.5-Omni + RAG 辨识链路。
 
 ## 目录速览
@@ -77,6 +78,7 @@ docker compose ps
 
 ```powershell
 D:\Miniconda\envs\ventilation-identify-system\python.exe web_backend\manage.py check
+D:\Miniconda\envs\ventilation-identify-system\python.exe web_backend\manage.py migrate
 D:\Miniconda\envs\ventilation-identify-system\python.exe web_backend\manage.py runserver 127.0.0.1:8000 --noreload
 ```
 
@@ -88,7 +90,7 @@ npm install
 npm run dev
 ```
 
-打开 `http://127.0.0.1:5173`。
+打开 `http://127.0.0.1:5173`，默认路由会进入 `/chat`。左侧 Gemini 风格侧边栏支持新建/切换/搜索/重命名/归档/删除对话，统计页在 `/stats`，偏好设置在 `/settings`，账号入口在 `/login` 和 `/register`。
 
 图片辨识无需进入单独页面；在主会话窗口点击 `+` 上传图片，再输入现场描述或检查重点后发送即可。
 

@@ -2,6 +2,61 @@
 
 默认后端地址：`http://127.0.0.1:8000`
 
+## 用户与会话同步 API
+
+用户模块使用 Django session。通过 Vite 同源代理访问时，前端请求会携带 cookie；跨域部署时需要额外配置 CSRF/CORS/session cookie。
+
+### POST `/api/users/auth/register/`
+
+注册并自动登录。
+
+```json
+{
+  "username": "yaezed",
+  "password": "160722",
+  "nickname": "安全工程师",
+  "avatarText": "安",
+  "settings": {
+    "useStream": true,
+    "autoExpandSteps": true,
+    "temperature": 0.2
+  }
+}
+```
+
+### POST `/api/users/auth/login/`
+
+```json
+{
+  "username": "yaezed",
+  "password": "160722"
+}
+```
+
+### POST `/api/users/auth/logout/`
+
+退出当前 session。
+
+### GET `/api/users/me/`
+
+返回当前登录用户；未登录时 `user` 为 `null`。
+
+### PATCH `/api/users/profile/`
+
+更新昵称、头像文字或偏好设置。
+
+### GET `/api/users/conversations/`
+
+返回当前用户的后端会话快照。
+
+### POST `/api/users/conversations/sync/`
+
+批量上行前端会话快照，后端按 `(user, conversation.id)` upsert 后返回完整会话列表。
+
+### DELETE `/api/users/conversations/<conversationId>/delete/`
+
+删除当前用户指定会话的后端快照。前端删除已登录账号下的会话时会调用该接口，避免下次同步把已删除会话重新拉回。
+
 ## POST `/api/chat/`
 
 文字问答，非流式返回。

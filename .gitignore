@@ -72,6 +72,7 @@ volumes/
 # IDEs and Editors
 .idea/
 .vscode/
+.claude/
 *.swp
 *.swo
 *~

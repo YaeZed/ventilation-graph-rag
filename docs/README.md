@@ -8,5 +8,5 @@
 | `api.md` | Django HTTP API 与 SSE 事件格式 |
 | `runbook.md` | 本地运行、验证、排障命令 |
 | `status.md` | 当前已完成能力、验证结果、剩余风险 |
+| `plan-user-module.md` | 用户模块实施计划、验收记录和后续路线图，已作为历史/验收/规划参考 |
 | `grill-me-interview/` | 原始设计访谈、阶段计划和开发进度 |
-

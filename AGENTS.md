@@ -52,6 +52,7 @@ docker compose up -d
 
 # Django checks and server
 D:\Miniconda\envs\ventilation-identify-system\python.exe web_backend\manage.py check
+D:\Miniconda\envs\ventilation-identify-system\python.exe web_backend\manage.py migrate
 D:\Miniconda\envs\ventilation-identify-system\python.exe web_backend\manage.py runserver 127.0.0.1:8000 --noreload
 
 # RAG CLI smoke test
@@ -82,6 +83,8 @@ npm run dev
 - Image upload flow is: Django temp file -> `VentilationRAGPipeline.query(image_path=...)` -> Qwen3.5-Omni observation -> concept retrieval -> Qwen3.5-Omni analysis -> Cypher template retrieval -> hybrid fallback -> answer generation.
 - Concept knowledge build flow is: create Neo4j `Concept` nodes, then populate Milvus collection `ventilation_concepts`. If `Concept` nodes already exist, `build_concept_knowledge.py` skips LLM generation and refreshes Milvus from Neo4j.
 - Frontend conversation isolation is intentional: sending state, SSE message updates, input drafts, and pending image previews are keyed by `conversationId`.
+- Frontend user-layer persistence is local-first in `frontend/src/stores/chat.ts`: guests use `ventilation-graph-rag:user-module:v2:guest`, logged-in users use `ventilation-graph-rag:user-module:v2:user:<userId>`, and snapshots sync to `web_backend/users` through Django session APIs. Existing-account login must not inherit guest/other-account conversations; only new registration migrates guest conversations.
+- Current image persistence is still compressed data URL inside the frontend conversation snapshot. The next user-module phase should move images to backend attachment records and keep only attachment references in conversation JSON.
 
 ## Environment Variables
 

@@ -1,6 +1,6 @@
 # 当前状态
 
-更新日期：2026-05-22
+更新日期：2026-05-26
 
 ## 已完成
 
@@ -25,6 +25,15 @@
   - SSE 流式输出
   - Markdown 渲染
   - 会话列表
+- 前端用户模块已完成：
+  - Gemini 风格浅色侧边栏，支持展开/收缩。
+  - 多会话新建、切换、重命名、删除、归档、恢复和搜索；搜索会对标题、风险等级、日期、消息正文做归一化加权匹配。
+  - 会话三点菜单支持分享、归档、重命名、导出 PDF 和删除；PDF 导出会将助手 Markdown 渲染为排版后的 HTML 再打印。
+  - 本地 `localStorage` 持久化会话、用户身份和偏好设置。
+  - `/login` 和 `/register` 登录/注册页已接入 Django session 账号。
+  - 登录用户会将当前账号作用域内的会话同步到 Django 后端 `ConversationRecord`，并同步昵称和偏好设置。
+  - 账号本地缓存已按用户 ID 隔离；已有账号登录只加载该账号本地缓存和后端会话，不再自动继承游客或其他账号的本地会话；注册新账号时才迁移游客会话。
+  - `/stats` 展示本地会话统计和 JSON 导出，`/settings` 管理昵称、流式响应、Agent 步骤展开和 temperature。
 - 前端会话隔离已覆盖发送状态、SSE 回写、输入框草稿和待上传图片预览；一个会话生成中不应阻塞其他会话发起请求。
 - 图片流式辨识已显示 Agent 步骤：初步观察、概念检索、概念增强分析、规程模板匹配、报告生成。
 - 新增真实图片识别精度验证功能：
@@ -36,6 +45,8 @@
 ## 已验证
 
 - `web_backend/manage.py check` 通过。
+- `web_backend/manage.py makemigrations --check --dry-run` 通过，无遗漏 migration。
+- 用户 API 烟测通过：注册、读取当前用户、同步会话、删除远端会话快照。
 - `agent/rag_system/test_ventilation_cypher_templates.py` 通过。
 - `agent/rag_system/test_ventilation_vision_extractor.py` 通过。
 - Docker 中 Neo4j 和 Milvus 可连。
@@ -48,7 +59,11 @@
 - Vite 代理 `/api/chat/stream/` 到 Django 后端可正常流式返回 token。
 - 视觉评估指标逻辑 `web_backend/chat/test_vision_evaluation.py` 通过 fake pipeline 烟测。
 - 概念知识层脚本支持 Neo4j 已有 `Concept` 时跳过 LLM 生成并刷新 Milvus `ventilation_concepts`。
-- `npm run build` 通过。
+- `node node_modules/vue-tsc/bin/vue-tsc.js --build` 通过。
+- `node node_modules/vite/bin/vite.js build` 通过。
+- 修复账号切换串号和设置页同步按钮循环后，`vue-tsc --build` 与 `vite build` 再次通过。
+- 修复 PDF 导出 Markdown 原文问题后，`vue-tsc --build` 与 `vite build` 再次通过。
+- 优化侧边栏对话搜索和清空按钮样式后，`vue-tsc --build` 与 `vite build` 再次通过。
 
 ## 剩余风险
 
@@ -57,3 +72,5 @@
 - Celery/Redis 目前只是离线任务预留，在线问答链路不依赖 Celery。
 - 生产部署尚未配置 ASGI/WSGI 服务、反向代理、静态资源托管和鉴权。
 - 本地 `.env` 可能覆盖示例配置；排查时以当前 `.env` 和运行日志中的 Milvus collection 为准。
+- 账号模块当前使用 Django session 和 SQLite，适合本地演示/开发；生产部署前仍需补齐 CSRF/CORS 策略、密码策略、权限审计和反向代理 cookie 配置。
+- 图片消息当前仍以压缩 data URL 写入前端会话快照，适合演示和刷新后预览，但不适合长期保存或跨设备同步；下一阶段应改为后端附件引用。

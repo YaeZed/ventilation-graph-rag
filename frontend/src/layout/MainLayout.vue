@@ -1,45 +1,14 @@
 <template>
   <div class="app-container">
-    <aside class="sidebar" :class="{ collapsed: isCollapsed }">
-      <div class="top-bar">
-        <button class="menu-btn" type="button" title="展开/收起菜单" @click="toggleSidebar">
-          <span class="menu-lines" aria-hidden="true"></span>
-        </button>
-      </div>
-
-      <div class="action-area">
-        <button class="new-chat-btn" type="button" title="发起新对话" @click="createConversation">
-          <span class="plus-icon">+</span>
-          <span class="btn-text">发起新对话</span>
-        </button>
-      </div>
-
-      <nav class="nav-menu custom-scrollbar">
-        <div class="nav-group-title">最近对话</div>
-        <button
-          v-for="conversation in chat.conversations"
-          :key="conversation.id"
-          class="nav-item"
-          :class="{ active: conversation.id === chat.activeId }"
-          type="button"
-          :title="conversation.title"
-          @click="chat.selectConversation(conversation.id)"
-        >
-          <span class="nav-text">{{ conversation.title }}</span>
-        </button>
-      </nav>
-
-      <div class="bottom-area">
-        <div class="nav-item info-item" title="规程知识库">
-          <span class="status-dot"></span>
-          <span class="nav-text">规程知识库已连接</span>
-        </div>
-        <div class="status-chip">
-          <span class="dot"></span>
-          <span class="loc-text">开发版本</span>
-        </div>
-      </div>
-    </aside>
+    <Sidebar
+      :collapsed="isCollapsed"
+      @toggle="toggleSidebar"
+      @create="createConversation"
+      @select="selectConversation"
+      @archive="archiveConversation"
+      @delete="deleteConversation"
+      @restore="restoreConversation"
+    />
 
     <main class="main-content">
       <router-view v-slot="{ Component }">
@@ -54,6 +23,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
+import Sidebar from '@/components/Sidebar.vue'
 import { useChatStore } from '@/stores/chat'
 
 const router = useRouter()
@@ -65,7 +35,33 @@ const toggleSidebar = () => {
 }
 
 const createConversation = () => {
-  chat.newConversation()
-  router.push('/')
+  const id = chat.createConversation()
+  router.push(`/chat/${id}`)
+}
+
+const selectConversation = (id: string) => {
+  if (chat.selectConversation(id)) {
+    router.push(`/chat/${id}`)
+  }
+}
+
+const archiveConversation = (id: string) => {
+  const nextId = chat.archiveConversation(id)
+  router.push(nextId ? `/chat/${nextId}` : '/chat')
+}
+
+const deleteConversation = (id: string) => {
+  const conversation = chat.findConversation(id)
+  if (!conversation) return
+  const confirmed = window.confirm(`删除“${conversation.title}”？此操作不可恢复。`)
+  if (!confirmed) return
+  const nextId = chat.deleteConversation(id)
+  router.push(nextId ? `/chat/${nextId}` : '/chat')
+}
+
+const restoreConversation = (id: string) => {
+  if (chat.restoreConversation(id)) {
+    router.push(`/chat/${id}`)
+  }
 }
 </script>
