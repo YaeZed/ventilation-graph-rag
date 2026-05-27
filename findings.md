@@ -51,4 +51,16 @@
 - `AGENTS.md` still described backend image attachments as a future phase; that was stale after P1 and has been corrected.
 - `README.md` still implied every upload is compressed into data URL; current truth is guest data URL, logged-in backend `ConversationAttachment`, fallback data URL only when upload fails.
 - `docs/plan-user-module.md` had P2 both as next phase and as completed section; it now treats P2 as completed and points next work at P3 backend/team aggregation or production account hardening.
-- `/stats` remains local-first. No backend stats API exists yet.
+- `/stats` was local-first before P3. P3 now adds backend stats for logged-in users while guests remain local-first.
+
+## P3 Backend Stats Findings
+
+- P3 can derive stats directly from `users.ConversationRecord`; no migration is needed for the first backend aggregation step.
+- The backend summary response intentionally mirrors frontend `ChatStats`, so `StatsView.vue` can keep the same rendering logic.
+- Logged-in stats only include the current authenticated user's records. Archived conversations are excluded from primary counts and included as `archivedCount`.
+- The first PowerShell `manage.py shell -c` smoke command failed due to argument quoting, not backend behavior. Python stdin execution validated the stats endpoints.
+- Chinese output in PowerShell/stdin may mismatch in direct literal assertions; use Unicode escape when validating exact Chinese labels from shell scripts.
+
+## P3 Neat-Freak Findings
+
+- `AGENTS.md` still described `/stats` as a P2 local-only panel and backend stats as a future P3 item. That was stale after P3 and has been corrected to the layered guest/local and logged-in/backend model.

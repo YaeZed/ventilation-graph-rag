@@ -95,6 +95,64 @@
 
 删除当前用户指定附件记录和本地 media 文件。
 
+### GET `/api/users/stats/summary/?days=7`
+
+返回当前登录用户的后端会话统计汇总。未归档会话参与主统计，归档会话只计入 `archivedCount`。`days` 控制趋势天数，范围会在后端限制到 1-90。
+
+响应：
+
+```json
+{
+  "ok": true,
+  "stats": {
+    "totalConversations": 3,
+    "totalMessages": 12,
+    "completedReports": 3,
+    "archivedCount": 1,
+    "completionRate": 67,
+    "activeDays": 2,
+    "latestActivity": "2026-05-27T09:30:00+08:00",
+    "recentSevenDays": [
+      {"date": "2026-05-21", "count": 0},
+      {"date": "2026-05-27", "count": 2}
+    ],
+    "sceneCounts": [
+      {"label": "局部通风机与风筒", "count": 2}
+    ],
+    "hazardCounts": [
+      {"label": "高风险", "count": 1, "tone": "danger"}
+    ],
+    "topHazardLabel": "高风险"
+  }
+}
+```
+
+### GET `/api/users/stats/trends/?days=7`
+
+返回当前登录用户未归档会话的日期趋势数组：
+
+```json
+{
+  "ok": true,
+  "trends": [
+    {"date": "2026-05-27", "count": 2}
+  ]
+}
+```
+
+### GET `/api/users/stats/hazards/`
+
+返回当前登录用户未归档会话的风险等级分布：
+
+```json
+{
+  "ok": true,
+  "hazards": [
+    {"label": "高风险", "count": 1, "tone": "danger"}
+  ]
+}
+```
+
 ## POST `/api/chat/`
 
 文字问答，非流式返回。

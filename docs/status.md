@@ -34,7 +34,7 @@
   - 登录用户会将当前账号作用域内的会话同步到 Django 后端 `ConversationRecord`，并同步昵称和偏好设置。
   - 账号本地缓存已按用户 ID 隔离；已有账号登录只加载该账号本地缓存和后端会话，不再自动继承游客或其他账号的本地会话；注册新账号时才迁移游客会话。
   - 登录用户图片附件已迁移到后端 `ConversationAttachment`；前端消息保存附件 URL/元数据，刷新和 PDF 导出仍可显示图片。
-  - `/stats` 展示本地会话统计和 JSON 导出，`/settings` 管理昵称、流式响应、Agent 步骤展开和 temperature。
+  - `/stats` 展示会话统计和 JSON 导出：游客使用本地统计，登录用户优先使用后端 `ConversationRecord` 聚合统计。
 - 前端会话隔离已覆盖发送状态、SSE 回写、输入框草稿和待上传图片预览；一个会话生成中不应阻塞其他会话发起请求。
 - 图片流式辨识已显示 Agent 步骤：初步观察、概念检索、概念增强分析、规程模板匹配、报告生成。
 - 新增真实图片识别精度验证功能：
@@ -66,6 +66,7 @@
 - 修复 PDF 导出 Markdown 原文问题后，`vue-tsc --build` 与 `vite build` 再次通过。
 - 优化侧边栏对话搜索和清空按钮样式后，`vue-tsc --build` 与 `vite build` 再次通过。
 - 新增后端图片附件存储后，`web_backend/manage.py check`、`web_backend/manage.py makemigrations --check --dry-run`、附件上传/列表/删除烟测、`vue-tsc --build` 和 `vite build` 通过。
+- 新增 P3 后端统计聚合后，`web_backend/manage.py check`、后端 stats summary/trends/hazards 烟测、`vue-tsc --build` 和 `vite build` 通过。
 
 ## 剩余风险
 
@@ -76,15 +77,15 @@
 - 本地 `.env` 可能覆盖示例配置；排查时以当前 `.env` 和运行日志中的 Milvus collection 为准。
 - 账号模块当前使用 Django session 和 SQLite，适合本地演示/开发；生产部署前仍需补齐 CSRF/CORS 策略、密码策略、权限审计和反向代理 cookie 配置。
 - 游客图片消息仍以压缩 data URL 写入本地会话快照；登录用户已使用后端附件引用。生产部署前仍需把开发期本地 media 存储替换或约束为正式对象存储/静态资源策略。
-## P2 统计面板增强
+## P2/P3 统计面板增强
 
 - `/stats` 已从基础计数升级为本地统计看板。
-- 数据来源仍是前端 Pinia store 中当前作用域的会话数据：游客只统计游客本地会话，登录用户只统计该用户同步后的会话。
+- P2 数据来源是前端 Pinia store 中当前作用域的会话数据；P3 已增加后端账号级聚合。游客只统计游客本地会话，登录用户优先使用 `GET /api/users/stats/summary/?days=7` 返回的后端统计。
 - 新增统计口径：
   - 会话数、归档数、消息总数、完成报告数。
   - 完成率：至少包含一份已完成助手报告的会话数 / 当前有效会话数。
   - 近 7 天活跃天数与每日趋势。
   - 风险等级分布与风险重点。
   - 场景分布。
-- 风险等级优先使用 `Conversation.hazardLevel`，空值归入 `未分级`；中文高/中/低风险和英文 high/medium/low 会归一到标准风险桶。
-- P2 未新增后端统计 API；`GET /api/users/stats/*` 仍保留给 P3 后端聚合阶段。
+- 风险等级前端使用 `Conversation.hazardLevel`，后端使用 `ConversationRecord.hazard_level`；空值归入 `未分级`，中文高/中/低风险和英文 high/medium/low 会归一到标准风险桶。
+- P3 接口包括 `GET /api/users/stats/summary/`、`GET /api/users/stats/trends/`、`GET /api/users/stats/hazards/`。当前仍是单用户聚合，团队级跨用户统计和权限模型尚未实现。

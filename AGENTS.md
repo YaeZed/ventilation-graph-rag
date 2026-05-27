@@ -85,7 +85,7 @@ npm run dev
 - Frontend conversation isolation is intentional: sending state, SSE message updates, input drafts, and pending image previews are keyed by `conversationId`.
 - Frontend user-layer persistence is local-first in `frontend/src/stores/chat.ts`: guests use `ventilation-graph-rag:user-module:v2:guest`, logged-in users use `ventilation-graph-rag:user-module:v2:user:<userId>`, and snapshots sync to `web_backend/users` through Django session APIs. Existing-account login must not inherit guest/other-account conversations; only new registration migrates guest conversations.
 - Frontend image persistence is split by identity: guests keep compressed data URLs in scoped localStorage; logged-in uploads create backend `ConversationAttachment` records and conversation snapshots keep only attachment URL/metadata. Development media files live under `web_backend/media/`; production still needs an object-storage or static-media policy.
-- `/stats` is a P2 local-first stats panel computed from the current scoped Pinia conversations. Backend/team aggregation APIs remain a P3 item.
+- `/stats` uses layered statistics: guests use local Pinia aggregation, while logged-in users prefer backend account-level aggregation from `ConversationRecord` through `GET /api/users/stats/summary/?days=7`; team-level aggregation and permissions are the next unfinished product layer.
 
 ## Environment Variables
 

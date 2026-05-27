@@ -1,6 +1,7 @@
 import { sendImageMessage, sendTextMessage, streamMessage, type StreamStepEvent } from '@/api/chat'
 import {
   deleteRemoteConversation,
+  fetchUserStatsSummary,
   fetchRemoteConversations,
   getCurrentUser,
   loginUser,
@@ -78,6 +79,7 @@ export type UserSettings = {
 
 export type AuthStatus = 'checking' | 'guest' | 'authenticated'
 export type SyncStatus = 'idle' | 'syncing' | 'synced' | 'error'
+export type StatsStatus = 'idle' | 'loading' | 'ready' | 'error'
 
 type StoredChatState = {
   conversations?: Conversation[]
@@ -174,6 +176,9 @@ export const useChatStore = defineStore('chat', () => {
   const authError = ref('')
   const syncStatus = ref<SyncStatus>('idle')
   const syncError = ref('')
+  const statsStatus = ref<StatsStatus>('idle')
+  const statsError = ref('')
+  const remoteStats = ref<ChatStats | null>(null)
   const lastSyncedAt = ref('')
   let saveTimer: number | undefined
   let syncTimer: number | undefined
@@ -194,7 +199,10 @@ export const useChatStore = defineStore('chat', () => {
     activeId.value ? Boolean(sendingByConversation.value[activeId.value]) : false,
   )
   const filteredConversations = computed(() => searchConversations(searchQuery.value))
-  const stats = computed<ChatStats>(() => buildStats())
+  const localStats = computed<ChatStats>(() => buildStats())
+  const stats = computed<ChatStats>(() =>
+    authStatus.value === 'authenticated' && remoteStats.value ? remoteStats.value : localStats.value,
+  )
 
   function loadFromStorage() {
     if (typeof window === 'undefined') return
@@ -230,6 +238,9 @@ export const useChatStore = defineStore('chat', () => {
       syncTimer = undefined
     }
     activeStorageKey = storageKeyForUser(user)
+    remoteStats.value = null
+    statsStatus.value = 'idle'
+    statsError.value = ''
     isApplyingRemote = true
     loadFromStorage()
     isApplyingRemote = false
@@ -718,6 +729,8 @@ export const useChatStore = defineStore('chat', () => {
       if (!user) {
         remoteUser.value = null
         authStatus.value = 'guest'
+        remoteStats.value = null
+        statsStatus.value = 'idle'
         switchStorageScope(null)
         return
       }
@@ -727,6 +740,8 @@ export const useChatStore = defineStore('chat', () => {
     } catch (exc) {
       remoteUser.value = null
       authStatus.value = 'guest'
+      remoteStats.value = null
+      statsStatus.value = 'idle'
       switchStorageScope(null)
       authError.value = exc instanceof Error ? exc.message : '无法读取登录状态'
     }
@@ -780,6 +795,8 @@ export const useChatStore = defineStore('chat', () => {
       remoteUser.value = null
       authStatus.value = 'guest'
       syncStatus.value = 'idle'
+      remoteStats.value = null
+      statsStatus.value = 'idle'
       switchStorageScope(null)
       return true
     } catch (exc) {
@@ -809,6 +826,7 @@ export const useChatStore = defineStore('chat', () => {
       syncStatus.value = 'synced'
       await nextTick()
       saveToStorage()
+      void refreshStats()
       return true
     } catch (exc) {
       syncStatus.value = 'error'
@@ -836,6 +854,7 @@ export const useChatStore = defineStore('chat', () => {
       await nextTick()
       saveToStorage()
       clearLegacyStorage()
+      void refreshStats()
       return true
     } catch (exc) {
       syncStatus.value = 'error'
@@ -857,7 +876,30 @@ export const useChatStore = defineStore('chat', () => {
     isApplyingRemote = false
     const ok = await syncWithRemote()
     if (ok) clearGuestStorage()
+    void refreshStats()
     return ok
+  }
+
+  async function refreshStats() {
+    if (authStatus.value !== 'authenticated') {
+      remoteStats.value = null
+      statsStatus.value = 'idle'
+      statsError.value = ''
+      return localStats.value
+    }
+
+    statsStatus.value = 'loading'
+    statsError.value = ''
+    try {
+      const nextStats = await fetchUserStatsSummary(7)
+      remoteStats.value = normalizeStats(nextStats, localStats.value)
+      statsStatus.value = 'ready'
+      return remoteStats.value
+    } catch (exc) {
+      statsStatus.value = 'error'
+      statsError.value = exc instanceof Error ? exc.message : '统计加载失败'
+      return localStats.value
+    }
   }
 
   function applyRemoteUser(user: RemoteUser) {
@@ -998,7 +1040,10 @@ export const useChatStore = defineStore('chat', () => {
     authError,
     syncStatus,
     syncError,
+    statsStatus,
+    statsError,
     lastSyncedAt,
+    localStats,
     stats,
     loadFromStorage,
     saveToStorage,
@@ -1020,6 +1065,7 @@ export const useChatStore = defineStore('chat', () => {
     loginAccount,
     logoutAccount,
     syncWithRemote,
+    refreshStats,
     exportConversationAsPDF,
     exportAllAsJson,
   }
@@ -1142,6 +1188,57 @@ function mergeConversations(localItems: Conversation[], remoteItems: Conversatio
     }
   })
   return sortByUpdatedAt([...merged.values()])
+}
+
+function normalizeStats(next: Partial<ChatStats>, fallback: ChatStats): ChatStats {
+  const recentSevenDays = normalizeCountItems(next.recentSevenDays, fallback.recentSevenDays).map((item) => ({
+    date: item.date || item.label,
+    count: item.count,
+  }))
+  const sceneCounts = normalizeCountItems(next.sceneCounts, fallback.sceneCounts).map((item) => ({
+    label: item.label || item.date,
+    count: item.count,
+  }))
+  const hazardCounts = normalizeCountItems(next.hazardCounts, fallback.hazardCounts).map((item) => {
+    const label = item.label || '未分级'
+    return {
+      label,
+      count: item.count,
+      tone: item.tone || hazardTone(label),
+    }
+  })
+
+  return {
+    totalConversations: safeNumber(next.totalConversations, fallback.totalConversations),
+    totalMessages: safeNumber(next.totalMessages, fallback.totalMessages),
+    completedReports: safeNumber(next.completedReports, fallback.completedReports),
+    archivedCount: safeNumber(next.archivedCount, fallback.archivedCount),
+    completionRate: safeNumber(next.completionRate, fallback.completionRate),
+    activeDays: safeNumber(next.activeDays, fallback.activeDays),
+    latestActivity: String(next.latestActivity || fallback.latestActivity || ''),
+    recentSevenDays,
+    sceneCounts,
+    hazardCounts,
+    topHazardLabel: String(next.topHazardLabel || fallback.topHazardLabel || '未分级'),
+  }
+}
+
+function normalizeCountItems<T extends { label?: string; date?: string; count?: number; tone?: ChatStats['hazardCounts'][number]['tone'] }>(
+  next: T[] | undefined,
+  fallback: T[],
+) {
+  const items = Array.isArray(next) ? next : fallback
+  return items.map((item) => ({
+    ...item,
+    label: String(item.label || ''),
+    date: String(item.date || ''),
+    count: safeNumber(item.count, 0),
+  }))
+}
+
+function safeNumber(value: unknown, fallback: number) {
+  const numberValue = Number(value)
+  return Number.isFinite(numberValue) ? numberValue : fallback
 }
 
 function tokenizeSearchQuery(query: string) {

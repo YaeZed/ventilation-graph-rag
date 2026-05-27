@@ -1,6 +1,6 @@
 # Plan: Agent 式用户模块
 
-> 状态：第一阶段、P1 后端图片附件存储、P2 统计面板增强已完成；下一阶段优先做 P3 后端/团队级统计聚合，或进入生产账号安全硬化。本文保留设计思路、实现边界、验收记录和后续路线图；运行和接手优先看 `docs/architecture.md`、`docs/api.md`、`docs/runbook.md` 和 `docs/status.md`。
+> 状态：第一阶段、P1 后端图片附件存储、P2 统计面板增强、P3 后端账号级统计聚合已完成；下一阶段优先做团队级权限/统计，或进入生产账号安全硬化。本文保留设计思路、实现边界、验收记录和后续路线图；运行和接手优先看 `docs/architecture.md`、`docs/api.md`、`docs/runbook.md` 和 `docs/status.md`。
 
 ## Context
 
@@ -50,7 +50,7 @@ ventilation-graph-rag 的辨识引擎已完成（VL 两轮识别 + 概念知识�
 | 偏好设置 | 默认 temperature、是否自动展开步骤时间线 |
 | 全量导出 JSON | 导出全量辨识记录为结构化 JSON 文件 |
 
-当前实施结果：**第一层已完成 + 第二层搜索、归档和导出已完成 + 第三层统计面板和偏好设置已可用 + 登录/注册与后端同步已完成 + 登录用户图片附件后端存储已完成**。
+当前实施结果：**第一层已完成 + 第二层搜索、归档和导出已完成 + 第三层统计面板和偏好设置已可用 + 登录/注册与后端同步已完成 + 登录用户图片附件后端存储已完成 + 登录用户统计已接入后端聚合**。
 
 ## 架构设计
 
@@ -267,15 +267,17 @@ P2 已按前端本地统计落地，范围限定在 `/stats` 和 Pinia store：
 3. JSON 导出仍保留。
 4. 已验证：`vue-tsc --build`、`vite build`。
 
-P2 不新增后端 API。P3 再考虑 `GET /api/users/stats/summary/`、`trends`、`hazards` 等后端聚合接口。
+P2 不新增后端 API，后端聚合已在 P3 完成。
 
-## 下一阶段路线图
+## P3 完成记录：后端账号级统计聚合
 
-### P3：团队级/后端聚合统计
+P3 已完成账号级后端统计聚合。当前统计来源分层：
 
-当前统计来自前端本地/同步快照。团队级统计需要后端聚合 API。
+- 游客：仍使用前端 Pinia 本地统计。
+- 登录用户：`/stats` 进入页面后调用 `GET /api/users/stats/summary/?days=7`，从后端 `ConversationRecord` 聚合。
+- 后端不可用或统计接口失败时：前端回退到本地统计，并在页面右上角显示回退状态。
 
-建议 API：
+当前 API：
 
 | API | 作用 |
 |---|---|
@@ -283,7 +285,39 @@ P2 不新增后端 API。P3 再考虑 `GET /api/users/stats/summary/`、`trends`
 | `GET /api/users/stats/trends/?days=7` | 趋势统计 |
 | `GET /api/users/stats/hazards/` | 风险/隐患类型分布 |
 
-### P4：生产级账号安全
+完成内容：
+
+- 后端新增统计聚合工具函数，直接从当前登录用户的 `ConversationRecord` 读取，不新增表和 migration。
+- 统计口径与 P2 前端保持一致：未归档会话参与主统计，归档会话只计入 `archivedCount`；完成率按“至少有一份完成报告的有效会话 / 有效会话总数”计算。
+- 前端新增 `fetchUserStatsSummary()` 和 `refreshStats()`；登录后、同步后、进入 `/stats` 时刷新后端统计。
+- `/stats` 右上角显示统计来源：本地统计、后端统计、后端统计同步中或回退本地统计。
+
+验收结果：
+
+1. 后端 stats summary/trends/hazards 烟测通过。
+2. `web_backend/manage.py check` 通过。
+3. `vue-tsc --build` 和 `vite build` 通过。
+
+剩余边界：
+
+- 当前 P3 是单账号聚合，不包含团队空间、角色权限或跨用户统计。
+- 后端统计读取 JSON 快照，未来数据量上来后可考虑增量统计表或缓存。
+
+## 下一阶段路线图
+
+### P4：团队级权限与统计
+
+当前账号模块只有单用户数据所有权。团队级统计需要先定义团队、成员、角色和可见范围，再做跨用户聚合。
+
+建议模型：
+
+| 模型 | 作用 |
+|---|---|
+| `Team` | 团队/项目空间 |
+| `TeamMembership` | 用户、团队和角色关系 |
+| `ConversationRecord.team` | 可选团队归属 |
+
+### P5：生产级账号安全
 
 当前账号模块使用 Django session 和 SQLite，定位是本地演示/开发。生产部署前需要补齐：
 

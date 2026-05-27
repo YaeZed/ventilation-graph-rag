@@ -776,6 +776,32 @@ a {
   cursor: pointer;
 }
 
+.page-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.stats-source {
+  max-width: 260px;
+  color: #6a7974;
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: right;
+}
+
+.stats-source.ready {
+  color: #155e75;
+}
+
+.stats-source.error {
+  color: #9a4f42;
+}
+
+.stats-source.loading {
+  color: #7a6425;
+}
+
 .stats-view,
 .settings-view {
   height: 100%;
@@ -1256,6 +1282,16 @@ a {
   .page-header,
   .stats-panel-header {
     flex-direction: column;
+  }
+
+  .page-actions {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .stats-source {
+    max-width: 100%;
+    text-align: left;
   }
 
   .settings-panel label {

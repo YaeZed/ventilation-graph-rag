@@ -1,4 +1,4 @@
-import type { ChatAttachment, Conversation, UserProfile, UserSettings } from '@/stores/chat'
+import type { ChatAttachment, ChatStats, Conversation, UserProfile, UserSettings } from '@/stores/chat'
 
 export type RemoteUser = {
   id: number
@@ -23,6 +23,12 @@ type ConversationsResponse = {
 type AttachmentResponse = {
   ok: boolean
   attachment?: ChatAttachment
+  error?: string
+}
+
+type StatsResponse = {
+  ok: boolean
+  stats?: ChatStats
   error?: string
 }
 
@@ -130,6 +136,13 @@ export async function uploadConversationAttachment(
   return parseAttachmentResponse(response)
 }
 
+export async function fetchUserStatsSummary(days = 7) {
+  const response = await fetch(`${API_BASE}/api/users/stats/summary/?days=${days}`, {
+    credentials: 'include',
+  })
+  return parseStatsResponse(response)
+}
+
 async function parseUserResponse(response: Response) {
   const payload = (await parseJson(response)) as UserResponse
   if (!response.ok || !payload.ok) {
@@ -159,6 +172,14 @@ async function parseAttachmentResponse(response: Response) {
     throw new Error(payload.error || `HTTP ${response.status}`)
   }
   return payload.attachment
+}
+
+async function parseStatsResponse(response: Response) {
+  const payload = (await parseJson(response)) as StatsResponse
+  if (!response.ok || !payload.ok || !payload.stats) {
+    throw new Error(payload.error || `HTTP ${response.status}`)
+  }
+  return payload.stats
 }
 
 async function parseJson(response: Response) {

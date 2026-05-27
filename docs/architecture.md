@@ -81,14 +81,14 @@ Django 不在 app 启动时立即加载 RAG，而是通过 `web_backend/chat/pip
 | `/` | 重定向到 `/chat` |
 | `/chat` | 主辨识对话页 |
 | `/chat/:conversationId` | 指定会话页 |
-| `/stats` | 本地会话统计和 JSON 导出 |
+| `/stats` | 会话统计和 JSON 导出 |
 | `/settings` | 本地偏好设置 |
 
 用户层状态集中在 `frontend/src/stores/chat.ts`。Pinia store 管理 `Conversation` 列表、当前会话、发送状态、搜索词、简易用户身份、偏好设置和账号同步状态。持久化采用账号作用域 key：游客写入 `localStorage` key `ventilation-graph-rag:user-module:v2:guest`，登录用户写入 `ventilation-graph-rag:user-module:v2:user:<userId>`，旧 `ventilation-graph-rag:user-module:v1` 仅作为游客迁移兼容。未登录时保持本地优先；已有账号登录只加载该账号本地缓存和后端会话，注册新账号时才把游客本地会话迁移到账号。发送状态、SSE 回写、输入草稿和待上传图片预览都按 `conversationId` 隔离。
 
 后端用户模块位于 `web_backend/users/`，使用 Django 内置 `User` 和 session 登录。`UserProfile` 保存昵称、头像文字和偏好设置，`ConversationRecord` 以 `(user, client_id)` 唯一约束保存前端会话快照、归档状态、元数据和消息 JSON。`ConversationAttachment` 保存登录用户上传的图片附件，开发期文件落在 `web_backend/media/conversation_attachments/`，前端消息只保存附件引用。当前实现面向本地开发和演示，生产部署前应补充更严格的鉴权、CSRF/CORS、cookie 和 media/object storage 配置。
 
-`/stats` 当前仍是前端本地统计面板，数据来自当前账号作用域内的 Pinia 会话快照，包含完成率、近 7 天趋势、风险等级分布和场景分布。后端聚合或团队级统计 API 还没有实现，保留给 P3。
+`/stats` 采用分层统计来源：游客模式使用当前 Pinia 会话快照本地统计；登录用户优先调用 `GET /api/users/stats/summary/?days=7`，从后端 `ConversationRecord` 聚合完成率、近 7 天趋势、风险等级分布和场景分布。若后端统计加载失败，前端会保留本地统计作为降级展示。独立的 `stats/trends` 和 `stats/hazards` 接口为后续团队级图表复用预留。
 
 侧边栏由 `Sidebar.vue`、`ConversationList.vue`、`ConversationItem.vue`、`UserMiniCard.vue` 等组件组成。它采用浅色 Gemini 风格：收缩态为图标轨，展开态包含新建对话、搜索、统计入口、未归档对话列表、可展开/收起的归档区、偏好设置和用户头像。单个会话的三点菜单支持分享、归档、重命名、导出 PDF 和删除。
 

@@ -1,36 +1,36 @@
-# Task Plan: User Module P2 Stats Panel Enhancement and Neat-Freak Sync
+# Task Plan: User Module P3 Backend Stats Aggregation
 
 ## Goal
 
-Improve the `/stats` page so users can quickly understand conversation volume, report completion, recent activity, scene distribution, and risk distribution from their current isolated conversation scope.
+Move logged-in `/stats` data from purely local Pinia aggregation to backend user-scoped aggregation, while keeping guest statistics local-first.
 
 ## Constraints
 
-- Keep P2 frontend/local-first. Do not add backend stats APIs until P3.
-- Compute stats only from the current store scope so guest/user isolation remains intact.
+- Keep guest mode local-first; unauthenticated users should not call backend stats APIs.
+- Logged-in stats must be computed only from the authenticated user's `ConversationRecord` rows.
 - Keep UI alignment consistent with the existing Gemini-style sidebar and current chat layout.
-- Avoid chart libraries for P2; use lightweight CSS bars/segments because the data is small.
+- Avoid new tables/migrations unless aggregation requires persisted rollups; P3 can derive from conversation snapshots.
 - Do not revert unrelated dirty worktree changes.
 
 ## Phases
 
 | Phase | Status | Scope |
 |---|---|---|
-| 1 | complete | Inspect P2 scope in `docs/plan-user-module.md`, `StatsView.vue`, `chat.ts`, and current CSS |
-| 2 | complete | Extend `ChatStats` with completion rate, active-day count, risk distribution, and top risk |
-| 3 | complete | Redesign `/stats` layout with aligned summary cards, trend bars, scene list, and risk distribution |
-| 4 | complete | Update docs/status/progress for P2 |
-| 5 | complete | Run frontend validation |
-| 6 | complete | Reconcile project docs after P1/P2 so AGENTS, README, runbook, architecture, status, and user-module plan match code |
+| 1 | complete | Inspect P3 plan, backend user models/views/routes, frontend stats store/view, and user API client |
+| 2 | complete | Add authenticated backend stats aggregation endpoints under `web_backend/users` |
+| 3 | complete | Add frontend stats API client and make `/stats` prefer backend stats for logged-in users |
+| 4 | complete | Update docs/API/status/runbook/plan for P3 |
+| 5 | complete | Run Django and frontend validation |
 
 ## Decisions
 
-- P2 should not depend on server aggregation. The frontend already has the current user's scoped conversations after login/sync.
-- Risk buckets use stored `hazardLevel` when present and fall back to `未分级`; inference improvements can stay in the store.
+- P3 summary endpoint should return the same shape as frontend `ChatStats` so the stats page stays simple.
+- Keep `/api/users/stats/summary/`, `/trends/`, and `/hazards/` because they were already documented as the P3 direction; `summary` can include all fields needed by the current UI.
+- Risk buckets use stored `hazard_level` when present and fall back to `未分级`; backend should match frontend normalization.
 - Completion means assistant messages with `role === "assistant"` and `status === "done"`.
 - Completion rate means conversations with at least one completed report divided by active conversations; this avoids rates above 100% when one conversation has multiple reports.
 - Visual charts use CSS so the page remains dependency-light and consistent with the existing UI.
-- Neat-freak sync should not run builds for docs-only changes; the latest P2 code validation remains `vue-tsc --build` and `vite build`.
+- Backend stats should ignore archived conversations for primary counts, with `archivedCount` reported separately.
 
 ## Error Log
 
@@ -38,3 +38,5 @@ Improve the `/stats` page so users can quickly understand conversation volume, r
 |---|---|---|
 | PowerShell renders Chinese as mojibake in shell output | Read Vue/CSS files through shell | Treat shell output as diagnostic only; preserve actual file content through targeted patches |
 | `rg` denied by sandbox | Search docs for stale phrases | Used PowerShell `Select-String` instead |
+| `manage.py shell -c` broke on PowerShell quoting | Backend stats smoke test | Re-ran the same smoke test through Python stdin |
+| Chinese literal assertion mismatch in stdin smoke test | Backend stats smoke test | Used Unicode escape for `高风险` assertion |

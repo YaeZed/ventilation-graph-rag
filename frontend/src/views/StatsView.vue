@@ -5,7 +5,12 @@
         <h1>统计</h1>
         <p>按当前账号的会话记录汇总辨识数量、完成度、风险等级和近期活跃情况。</p>
       </div>
-      <button type="button" @click="chat.exportAllAsJson">导出 JSON</button>
+      <div class="page-actions">
+        <span class="stats-source" :class="chat.statsStatus">
+          {{ statsSourceText }}
+        </span>
+        <button type="button" @click="chat.exportAllAsJson">导出 JSON</button>
+      </div>
     </header>
 
     <div class="stats-grid">
@@ -117,10 +122,14 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useChatStore } from '@/stores/chat'
 
 const chat = useChatStore()
+
+onMounted(() => {
+  void chat.refreshStats()
+})
 
 const maxCount = computed(() =>
   Math.max(1, ...chat.stats.recentSevenDays.map((item) => item.count)),
@@ -137,6 +146,13 @@ const hazardSummary = computed(() => {
   const total = chat.stats.hazardCounts.reduce((sum, item) => sum + item.count, 0)
   if (!total) return '暂无风险标记'
   return `${total} 条风险记录`
+})
+const statsSourceText = computed(() => {
+  if (chat.authStatus !== 'authenticated') return '本地统计'
+  if (chat.statsStatus === 'loading') return '后端统计同步中'
+  if (chat.statsStatus === 'error') return `使用本地统计：${chat.statsError}`
+  if (chat.statsStatus === 'ready') return '后端统计'
+  return '后端统计待同步'
 })
 
 const barHeight = (count: number) => Math.max(8, Math.round((count / maxCount.value) * 100))

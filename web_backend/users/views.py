@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from django.contrib.auth import authenticate, login, logout
@@ -24,6 +24,11 @@ DEFAULT_SETTINGS = {
     "temperature": 0.2,
 }
 MAX_ATTACHMENT_SIZE = 8 * 1024 * 1024
+HAZARD_TONES = {
+    "高风险": "danger",
+    "中风险": "warning",
+    "低风险": "success",
+}
 
 
 def _json_error(message: str, status: int = 400):
@@ -108,6 +113,137 @@ def _serialize_attachment(attachment: ConversationAttachment, request):
     }
 
 
+def _normalize_hazard_label(value: Any):
+    label = str(value or "").strip()
+    if not label:
+        return "未分级"
+    lower = label.lower()
+    if any(token in label for token in ["高", "重大", "严重"]) or any(
+        token in lower for token in ["danger", "high"]
+    ):
+        return "高风险"
+    if any(token in label for token in ["中", "较大"]) or any(
+        token in lower for token in ["warning", "medium"]
+    ):
+        return "中风险"
+    if any(token in label for token in ["低", "一般", "轻微"]) or any(
+        token in lower for token in ["success", "low"]
+    ):
+        return "低风险"
+    return label
+
+
+def _hazard_rank(label: str):
+    if label == "高风险":
+        return 1
+    if label == "中风险":
+        return 2
+    if label == "低风险":
+        return 3
+    if label == "未分级":
+        return 9
+    return 4
+
+
+def _hazard_tone(label: str):
+    return HAZARD_TONES.get(label, "neutral")
+
+
+def _record_updated_at(record: ConversationRecord):
+    return record.client_updated_at or record.updated_at or record.created_at
+
+
+def _count_completed_reports(messages: Any):
+    if not isinstance(messages, list):
+        return 0
+    return sum(
+        1
+        for message in messages
+        if isinstance(message, dict)
+        and message.get("role") == "assistant"
+        and message.get("status") == "done"
+    )
+
+
+def _build_recent_days(records, days: int):
+    safe_days = min(max(days, 1), 90)
+    today = timezone.localdate()
+    buckets = {
+        (today - timedelta(days=safe_days - 1 - index)).isoformat(): 0
+        for index in range(safe_days)
+    }
+    for record in records:
+        updated_at = _record_updated_at(record)
+        if not updated_at:
+            continue
+        local_day = timezone.localtime(updated_at).date().isoformat()
+        if local_day in buckets:
+            buckets[local_day] += 1
+    return [{"date": date, "count": count} for date, count in buckets.items()]
+
+
+def _build_stats_payload(user, days: int = 7):
+    records = list(user.conversation_records.all())
+    active_records = [record for record in records if not record.is_archived]
+    active_records.sort(key=_record_updated_at, reverse=True)
+
+    scene_counts: dict[str, int] = {}
+    hazard_counts: dict[str, int] = {}
+    completed_reports = 0
+    completed_conversations = 0
+    total_messages = 0
+
+    for record in active_records:
+        messages = record.messages if isinstance(record.messages, list) else []
+        total_messages += len(messages)
+        report_count = _count_completed_reports(messages)
+        completed_reports += report_count
+        if report_count:
+            completed_conversations += 1
+
+        scene_label = record.scene_type or record.hazard_level or "未分类"
+        scene_counts[scene_label] = scene_counts.get(scene_label, 0) + 1
+        hazard_label = _normalize_hazard_label(record.hazard_level)
+        hazard_counts[hazard_label] = hazard_counts.get(hazard_label, 0) + 1
+
+    hazard_items = sorted(
+        (
+            {
+                "label": label,
+                "count": count,
+                "tone": _hazard_tone(label),
+            }
+            for label, count in hazard_counts.items()
+        ),
+        key=lambda item: (-item["count"], _hazard_rank(item["label"])),
+    )
+    recent_days = _build_recent_days(active_records, days)
+    latest_activity = _record_updated_at(active_records[0]).isoformat() if active_records else ""
+
+    return {
+        "totalConversations": len(active_records),
+        "totalMessages": total_messages,
+        "completedReports": completed_reports,
+        "archivedCount": len(records) - len(active_records),
+        "completionRate": round((completed_conversations / len(active_records)) * 100)
+        if active_records
+        else 0,
+        "activeDays": sum(1 for item in recent_days if item["count"] > 0),
+        "latestActivity": latest_activity,
+        "recentSevenDays": recent_days,
+        "sceneCounts": sorted(
+            ({"label": label, "count": count} for label, count in scene_counts.items()),
+            key=lambda item: item["count"],
+            reverse=True,
+        ),
+        "hazardCounts": hazard_items,
+        "topHazardLabel": next(
+            (item["label"] for item in hazard_items if item["label"] != "未分级"),
+            "未分级",
+        ),
+    }
+
+
 def _delete_attachment_file(attachment: ConversationAttachment):
     if attachment.file:
         attachment.file.delete(save=False)
@@ -120,6 +256,14 @@ def _clean_text(value: Any, fallback: str, max_length: int):
 
 def _clean_messages(value: Any):
     return value if isinstance(value, list) else []
+
+
+def _parse_positive_int(value: Any, fallback: int):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return parsed if parsed > 0 else fallback
 
 
 def _upsert_conversation(user, item: dict[str, Any]):
@@ -265,6 +409,45 @@ def conversations_view(request):
     records = request.user.conversation_records.order_by("-client_updated_at", "-updated_at")
     return JsonResponse(
         {"ok": True, "conversations": [_serialize_conversation(record) for record in records]},
+        json_dumps_params={"ensure_ascii": False},
+    )
+
+
+@require_GET
+def stats_summary_view(request):
+    auth_error = _require_auth(request)
+    if auth_error:
+        return auth_error
+
+    days = _parse_positive_int(request.GET.get("days"), 7)
+    return JsonResponse(
+        {"ok": True, "stats": _build_stats_payload(request.user, days)},
+        json_dumps_params={"ensure_ascii": False},
+    )
+
+
+@require_GET
+def stats_trends_view(request):
+    auth_error = _require_auth(request)
+    if auth_error:
+        return auth_error
+
+    days = _parse_positive_int(request.GET.get("days"), 7)
+    records = list(request.user.conversation_records.filter(is_archived=False))
+    return JsonResponse(
+        {"ok": True, "trends": _build_recent_days(records, days)},
+        json_dumps_params={"ensure_ascii": False},
+    )
+
+
+@require_GET
+def stats_hazards_view(request):
+    auth_error = _require_auth(request)
+    if auth_error:
+        return auth_error
+
+    return JsonResponse(
+        {"ok": True, "hazards": _build_stats_payload(request.user)["hazardCounts"]},
         json_dumps_params={"ensure_ascii": False},
     )
 
