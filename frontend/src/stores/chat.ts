@@ -8,9 +8,10 @@ import {
   registerUser,
   syncRemoteConversations,
   updateRemoteProfile,
+  uploadConversationAttachment,
   type RemoteUser,
 } from '@/api/users'
-import MarkdownIt from 'markdown-it'
+import { createSafeMarkdownRenderer } from '@/utils/markdown'
 import { defineStore } from 'pinia'
 import { computed, nextTick, ref, watch } from 'vue'
 
@@ -25,12 +26,25 @@ export type AgentStep = {
   data?: Record<string, unknown>
 }
 
+export type ChatAttachment = {
+  id: string
+  kind: 'image'
+  name: string
+  url: string
+  thumbnailUrl?: string
+  size: number
+  mimeType: string
+  createdAt: string
+  messageClientId?: string | null
+}
+
 export type ChatMessage = {
   id: string
   role: MessageRole
   content: string
   imageUrl?: string
   sourceFileName?: string
+  attachments?: ChatAttachment[]
   createdAt: string
   status?: 'streaming' | 'done' | 'error'
   steps?: AgentStep[]
@@ -47,6 +61,7 @@ export type Conversation = {
   hazardLevel?: string
   isArchived?: boolean
   previewImageUrl?: string
+  previewAttachmentId?: string
   isTitleManual?: boolean
 }
 
@@ -77,9 +92,21 @@ export type ChatStats = {
   totalMessages: number
   completedReports: number
   archivedCount: number
+  completionRate: number
+  activeDays: number
   latestActivity: string
   recentSevenDays: Array<{ date: string; count: number }>
   sceneCounts: Array<{ label: string; count: number }>
+  hazardCounts: Array<{ label: string; count: number; tone: 'danger' | 'warning' | 'success' | 'neutral' }>
+  topHazardLabel: string
+}
+
+type AppendMessageOptions = {
+  id?: string
+  imageUrl?: string
+  status?: ChatMessage['status']
+  sourceFileName?: string
+  attachments?: ChatAttachment[]
 }
 
 const LEGACY_STORAGE_KEY = 'ventilation-graph-rag:user-module:v1'
@@ -117,11 +144,7 @@ const DEFAULT_SETTINGS: UserSettings = {
   temperature: 0.2,
 }
 
-const printableMarkdown = new MarkdownIt({
-  html: false,
-  linkify: true,
-  breaks: true,
-})
+const printableMarkdown = createSafeMarkdownRenderer()
 
 const createId = () => {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -223,7 +246,7 @@ export const useChatStore = defineStore('chat', () => {
     if (typeof window === 'undefined') return
     const payload: StoredChatState = {
       conversations: conversations.value.map((conversation) =>
-        sanitizeConversationForStorage(conversation, true),
+        sanitizeConversationForStorage(conversation, authStatus.value !== 'authenticated'),
       ),
       activeId: activeId.value,
       userProfile: userProfile.value,
@@ -342,20 +365,33 @@ export const useChatStore = defineStore('chat', () => {
     setConversationSending(conversationId, true)
     error.value = ''
 
-    const imageUrl = image ? await fileToImageDataUrl(image) : undefined
+    const messageId = createId()
+    const uploadedAttachment = image ? await uploadAttachmentForMessage(conversationId, image, messageId) : undefined
+    const fallbackImageUrl =
+      image && (!uploadedAttachment || authStatus.value !== 'authenticated')
+        ? await fileToImageDataUrl(image)
+        : undefined
+    const messageImageUrl = uploadedAttachment?.url || fallbackImageUrl
     const userMessage = appendMessage(
       conversationId,
       'user',
       trimmedQuestion || '请判断图片中的通风安全隐患',
-      imageUrl,
-      'done',
-      image?.name,
+      {
+        id: messageId,
+        imageUrl: messageImageUrl,
+        status: 'done',
+        sourceFileName: image?.name,
+        attachments: uploadedAttachment ? [uploadedAttachment] : undefined,
+      },
     )
-    if (imageUrl && !conversation.previewImageUrl) {
-      conversation.previewImageUrl = imageUrl
+    if (messageImageUrl && !conversation.previewImageUrl) {
+      conversation.previewImageUrl = messageImageUrl
+    }
+    if (uploadedAttachment && !conversation.previewAttachmentId) {
+      conversation.previewAttachmentId = uploadedAttachment.id
     }
     updateAutoTitle(conversation, userMessage.content)
-    const assistantMessage = appendMessage(conversationId, 'assistant', '', undefined, 'streaming')
+    const assistantMessage = appendMessage(conversationId, 'assistant', '', { status: 'streaming' })
     let hasReceivedToken = false
 
     try {
@@ -432,18 +468,17 @@ export const useChatStore = defineStore('chat', () => {
     conversationId: string,
     role: MessageRole,
     content: string,
-    imageUrl?: string,
-    status: ChatMessage['status'] = 'done',
-    sourceFileName?: string,
+    options: AppendMessageOptions = {},
   ): ChatMessage {
     const message: ChatMessage = {
-      id: createId(),
+      id: options.id || createId(),
       role,
       content,
-      imageUrl,
-      sourceFileName,
+      imageUrl: options.imageUrl,
+      sourceFileName: options.sourceFileName,
+      attachments: options.attachments,
       createdAt: new Date().toISOString(),
-      status,
+      status: options.status || 'done',
     }
     const conversation = findConversation(conversationId)
     if (!conversation) {
@@ -452,6 +487,17 @@ export const useChatStore = defineStore('chat', () => {
     conversation.messages.push(message)
     conversation.updatedAt = new Date().toISOString()
     return conversation.messages[conversation.messages.length - 1]!
+  }
+
+  async function uploadAttachmentForMessage(conversationId: string, image: File, messageId: string) {
+    if (authStatus.value !== 'authenticated') return undefined
+    try {
+      return await uploadConversationAttachment(conversationId, image, messageId)
+    } catch (exc) {
+      syncStatus.value = 'error'
+      syncError.value = exc instanceof Error ? exc.message : '图片附件上传失败'
+      return undefined
+    }
   }
 
   function findConversation(id: string): Conversation | undefined {
@@ -752,7 +798,7 @@ export const useChatStore = defineStore('chat', () => {
     syncError.value = ''
     try {
       const remoteConversations = await syncRemoteConversations(
-        conversations.value.map((conversation) => sanitizeConversationForStorage(conversation, true)),
+        conversations.value.map((conversation) => sanitizeConversationForStorage(conversation, false)),
       )
       isApplyingRemote = true
       conversations.value = mergeConversations(conversations.value, remoteConversations)
@@ -866,7 +912,7 @@ export const useChatStore = defineStore('chat', () => {
     const payload = {
       exportedAt: new Date().toISOString(),
       conversations: conversations.value.map((conversation) =>
-        sanitizeConversationForStorage(conversation, true),
+        sanitizeConversationForStorage(conversation, authStatus.value !== 'authenticated'),
       ),
       userProfile: userProfile.value,
       settings: settings.value,
@@ -884,27 +930,42 @@ export const useChatStore = defineStore('chat', () => {
   function buildStats(): ChatStats {
     const activeItems = conversations.value.filter((conversation) => !conversation.isArchived)
     const sceneMap = new Map<string, number>()
+    const hazardMap = new Map<string, number>()
     activeItems.forEach((conversation) => {
       const label = conversation.sceneType || conversation.hazardLevel || '未分类'
       sceneMap.set(label, (sceneMap.get(label) || 0) + 1)
+      const hazardLabel = normalizeHazardLabel(conversation.hazardLevel)
+      hazardMap.set(hazardLabel, (hazardMap.get(hazardLabel) || 0) + 1)
     })
+    const completedReports = activeItems.reduce(
+      (sum, item) =>
+        sum +
+        item.messages.filter((message) => message.role === 'assistant' && message.status === 'done')
+          .length,
+      0,
+    )
+    const completedConversations = activeItems.filter((conversation) =>
+      conversation.messages.some((message) => message.role === 'assistant' && message.status === 'done'),
+    ).length
+    const recentSevenDays = buildRecentSevenDays(activeItems)
+    const hazardCounts = [...hazardMap.entries()]
+      .map(([label, count]) => ({ label, count, tone: hazardTone(label) }))
+      .sort((left, right) => right.count - left.count || hazardRank(left.label) - hazardRank(right.label))
 
     return {
       totalConversations: activeItems.length,
       totalMessages: activeItems.reduce((sum, item) => sum + item.messages.length, 0),
-      completedReports: activeItems.reduce(
-        (sum, item) =>
-          sum +
-          item.messages.filter((message) => message.role === 'assistant' && message.status === 'done')
-            .length,
-        0,
-      ),
+      completedReports,
       archivedCount: archivedConversations.value.length,
+      completionRate: activeItems.length ? Math.round((completedConversations / activeItems.length) * 100) : 0,
+      activeDays: recentSevenDays.filter((item) => item.count > 0).length,
       latestActivity: activeItems[0]?.updatedAt || '',
-      recentSevenDays: buildRecentSevenDays(activeItems),
+      recentSevenDays,
       sceneCounts: [...sceneMap.entries()]
         .map(([label, count]) => ({ label, count }))
         .sort((left, right) => right.count - left.count),
+      hazardCounts,
+      topHazardLabel: hazardCounts.find((item) => item.label !== '未分级')?.label || '未分级',
     }
   }
 
@@ -981,6 +1042,7 @@ function normalizeConversations(items: Conversation[]) {
           hazardLevel: item.hazardLevel,
           isArchived: Boolean(item.isArchived),
           previewImageUrl: isPersistableImageUrl(item.previewImageUrl) ? item.previewImageUrl : undefined,
+          previewAttachmentId: item.previewAttachmentId,
           isTitleManual: Boolean(item.isTitleManual),
         }
       }),
@@ -1000,6 +1062,7 @@ function normalizeMessages(items: ChatMessage[]): ChatMessage[] {
           : String(item.content || ''),
       imageUrl: isPersistableImageUrl(item.imageUrl) ? item.imageUrl : undefined,
       sourceFileName: item.sourceFileName,
+      attachments: normalizeAttachments(item.attachments || []),
       createdAt: item.createdAt || new Date().toISOString(),
       status: item.status === 'streaming' ? 'error' : item.status || 'done',
       steps: item.steps?.map((step) => ({
@@ -1011,6 +1074,24 @@ function normalizeMessages(items: ChatMessage[]): ChatMessage[] {
       })),
       currentStatus: item.currentStatus,
     }))
+}
+
+function normalizeAttachments(items: ChatAttachment[]): ChatAttachment[] | undefined {
+  const attachments = (Array.isArray(items) ? items : [])
+    .filter((item) => item && item.kind === 'image' && typeof item.url === 'string')
+    .map((item) => ({
+      id: String(item.id || ''),
+      kind: 'image' as const,
+      name: String(item.name || '现场图片'),
+      url: item.url,
+      thumbnailUrl: item.thumbnailUrl || item.url,
+      size: Number(item.size || 0),
+      mimeType: String(item.mimeType || 'image/*'),
+      createdAt: item.createdAt || new Date().toISOString(),
+      messageClientId: item.messageClientId || null,
+    }))
+    .filter((item) => item.id && isPersistableImageUrl(item.url))
+  return attachments.length ? attachments : undefined
 }
 
 function normalizeProfile(profile?: Partial<UserProfile>) {
@@ -1031,14 +1112,17 @@ function normalizeSettings(next?: Partial<UserSettings>) {
 }
 
 function sanitizeConversationForStorage(conversation: Conversation, includeImages: boolean): Conversation {
+  const shouldKeepImageUrl = (value?: string) =>
+    includeImages && isPersistableImageUrl(value) && !isDataUrl(value)
   return {
     ...conversation,
-    previewImageUrl: includeImages && isPersistableImageUrl(conversation.previewImageUrl)
+    previewImageUrl: shouldKeepImageUrl(conversation.previewImageUrl)
       ? conversation.previewImageUrl
       : undefined,
     messages: conversation.messages.map((message) => ({
       ...message,
-      imageUrl: includeImages && isPersistableImageUrl(message.imageUrl) ? message.imageUrl : undefined,
+      imageUrl: shouldKeepImageUrl(message.imageUrl) ? message.imageUrl : undefined,
+      attachments: normalizeAttachments(message.attachments || []),
     })),
   }
 }
@@ -1126,6 +1210,10 @@ function isPersistableImageUrl(value?: string) {
   return Boolean(value && !value.startsWith('blob:'))
 }
 
+function isDataUrl(value?: string) {
+  return Boolean(value?.startsWith('data:'))
+}
+
 function buildRecentSevenDays(conversations: Conversation[]) {
   const days = Array.from({ length: 7 }, (_, index) => {
     const date = new Date()
@@ -1138,6 +1226,30 @@ function buildRecentSevenDays(conversations: Conversation[]) {
   }))
 }
 
+function normalizeHazardLabel(value?: string) {
+  const label = String(value || '').trim()
+  if (!label) return '未分级'
+  if (/高|重大|严重|danger|high/i.test(label)) return '高风险'
+  if (/中|较大|warning|medium/i.test(label)) return '中风险'
+  if (/低|一般|轻微|success|low/i.test(label)) return '低风险'
+  return label
+}
+
+function hazardRank(label: string) {
+  if (label === '高风险') return 1
+  if (label === '中风险') return 2
+  if (label === '低风险') return 3
+  if (label === '未分级') return 9
+  return 4
+}
+
+function hazardTone(label: string): 'danger' | 'warning' | 'success' | 'neutral' {
+  if (label === '高风险') return 'danger'
+  if (label === '中风险') return 'warning'
+  if (label === '低风险') return 'success'
+  return 'neutral'
+}
+
 function buildPrintableReport(conversation: Conversation) {
   const messages = conversation.messages
     .map((message) => {
@@ -1146,11 +1258,13 @@ function buildPrintableReport(conversation: Conversation) {
         message.role === 'assistant'
           ? renderPrintableMarkdown(content)
           : renderPrintablePlainText(content)
-      const image = message.imageUrl
-        ? `<img class="report-image" src="${escapeAttribute(message.imageUrl)}" alt="现场图片" />`
+      const imageUrl = getMessageImageUrl(message)
+      const image = imageUrl
+        ? `<img class="report-image" src="${escapeAttribute(imageUrl)}" alt="现场图片" />`
         : ''
-      const source = message.sourceFileName
-        ? `<div class="source-file">图片文件：${escapeHtml(message.sourceFileName)}</div>`
+      const imageName = getMessageImageName(message)
+      const source = imageName
+        ? `<div class="source-file">图片文件：${escapeHtml(imageName)}</div>`
         : ''
       return `<section class="message ${message.role}">
         <div class="message-meta">${message.role === 'assistant' ? '辨识报告' : '现场输入'} · ${formatDateTime(
@@ -1206,6 +1320,14 @@ function buildPrintableReport(conversation: Conversation) {
       ${messages}
     </body>
   </html>`
+}
+
+function getMessageImageUrl(message: ChatMessage) {
+  return message.attachments?.[0]?.url || message.imageUrl || ''
+}
+
+function getMessageImageName(message: ChatMessage) {
+  return message.attachments?.[0]?.name || message.sourceFileName || ''
 }
 
 function escapeHtml(value: string) {

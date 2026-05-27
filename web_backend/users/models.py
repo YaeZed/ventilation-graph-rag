@@ -55,3 +55,32 @@ class ConversationRecord(models.Model):
     def __str__(self) -> str:
         return f"{self.user_id}:{self.title}"
 
+
+class ConversationAttachment(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="conversation_attachments",
+    )
+    conversation = models.ForeignKey(
+        ConversationRecord,
+        on_delete=models.CASCADE,
+        related_name="attachments",
+    )
+    message_client_id = models.CharField(max_length=80, blank=True)
+    file = models.FileField(upload_to="conversation_attachments/%Y/%m/%d/")
+    original_name = models.CharField(max_length=160)
+    mime_type = models.CharField(max_length=80)
+    size = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["user", "conversation", "-created_at"]),
+            models.Index(fields=["user", "message_client_id"]),
+        ]
+        verbose_name = "conversation attachment"
+        verbose_name_plural = "conversation attachments"
+
+    def __str__(self) -> str:
+        return f"{self.user_id}:{self.original_name}"

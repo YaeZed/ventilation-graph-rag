@@ -2,7 +2,7 @@
   <section class="home-view">
     <header class="header-section">
       <div>
-        <h1>煤矿通风隐患智能辨识</h1>
+        <h1>矿风眼</h1>
         <p>{{ headerDescription }}</p>
       </div>
       <div class="header-actions">
@@ -35,62 +35,69 @@
       </div>
     </header>
 
-    <div ref="messagesEl" class="result-area custom-scrollbar">
-      <EmptyState
-        v-if="!chat.activeConversation || chat.activeConversation.messages.length === 0"
-        @pick="applyPrompt"
-      />
-
-      <template v-if="chat.activeConversation">
-        <article
-          v-for="message in chat.activeConversation.messages"
-          :key="message.id"
-          class="message-card"
-          :class="[message.role, message.status]"
-        >
-          <div class="card-header">
-            <span class="tag" :class="message.role === 'assistant' ? tagClass(message) : 'neutral'">
-              {{ message.role === 'assistant' ? '辨识报告' : '现场输入' }}
-            </span>
-            <span class="timestamp">{{ formatTime(message.createdAt) }}</span>
-          </div>
-
-          <figure v-if="message.imageUrl" class="image-frame">
-            <img class="message-image" :src="message.imageUrl" alt="上传的现场图片" />
-            <figcaption v-if="message.sourceFileName">{{ message.sourceFileName }}</figcaption>
-          </figure>
-
-          <div v-if="message.role === 'assistant' && message.steps?.length" class="agent-steps">
-            <button class="steps-summary" type="button" @click="toggleSteps(message.id)">
-              <span>{{ stepSummary(message) }}</span>
-              <span class="chevron">{{ collapsedSteps[message.id] ? '展开' : '收起' }}</span>
-            </button>
-            <ol v-if="!collapsedSteps[message.id]" class="step-list">
-              <li
-                v-for="step in message.steps"
-                :key="step.key"
-                class="step-item"
-                :class="step.status"
-              >
-                <span class="step-dot"></span>
-                <div>
-                  <strong>{{ step.label }}</strong>
-                  <p>{{ step.message }}</p>
-                  <small v-if="stepMeta(step)">{{ stepMeta(step) }}</small>
-                </div>
-              </li>
-            </ol>
-          </div>
-
-          <MarkdownRenderer
-            v-if="message.role === 'assistant' && message.content && hasReportContent(message)"
-            :content="message.content"
+    <div ref="messagesEl" class="result-area custom-scrollbar" @scroll.passive="rememberActiveScroll">
+      <Transition name="fade" mode="out-in" @after-enter="restoreActiveScroll">
+        <div :key="chat.activeId || 'empty-conversation'" class="conversation-pane">
+          <EmptyState
+            v-if="!chat.activeConversation || chat.activeConversation.messages.length === 0"
+            @pick="applyPrompt"
           />
-          <div v-else class="ai-text">
-            {{ message.content || message.currentStatus || '正在生成...' }}
-          </div>
-        </article>
-      </template>
+
+          <template v-if="chat.activeConversation">
+            <article
+              v-for="message in chat.activeConversation.messages"
+              :key="message.id"
+              class="message-card"
+              :class="[message.role, message.status]"
+            >
+              <div class="card-header">
+                <span
+                  class="tag"
+                  :class="message.role === 'assistant' ? tagClass(message) : 'neutral'"
+                >
+                  {{ message.role === 'assistant' ? '辨识报告' : '现场输入' }}
+                </span>
+                <span class="timestamp">{{ formatTime(message.createdAt) }}</span>
+              </div>
+
+              <figure v-if="messageImageUrl(message)" class="image-frame">
+                <img class="message-image" :src="messageImageUrl(message)" alt="上传的现场图片" />
+                <figcaption v-if="imageCaption(message)">{{ imageCaption(message) }}</figcaption>
+              </figure>
+
+              <div v-if="message.role === 'assistant' && message.steps?.length" class="agent-steps">
+                <button class="steps-summary" type="button" @click="toggleSteps(message.id)">
+                  <span>{{ stepSummary(message) }}</span>
+                  <span class="chevron">{{ collapsedSteps[message.id] ? '展开' : '收起' }}</span>
+                </button>
+                <ol v-if="!collapsedSteps[message.id]" class="step-list">
+                  <li
+                    v-for="step in message.steps"
+                    :key="step.key"
+                    class="step-item"
+                    :class="step.status"
+                  >
+                    <span class="step-dot"></span>
+                    <div>
+                      <strong>{{ step.label }}</strong>
+                      <p>{{ step.message }}</p>
+                      <small v-if="stepMeta(step)">{{ stepMeta(step) }}</small>
+                    </div>
+                  </li>
+                </ol>
+              </div>
+
+              <MarkdownRenderer
+                v-if="message.role === 'assistant' && message.content && hasReportContent(message)"
+                :content="message.content"
+              />
+              <div v-else class="ai-text">
+                {{ message.content || message.currentStatus || '正在生成...' }}
+              </div>
+            </article>
+          </template>
+        </div>
+      </Transition>
     </div>
 
     <form class="bottom-bar-container" @submit.prevent="submit">
@@ -132,6 +139,9 @@ const drafts = reactive<Record<string, InputDraft>>({})
 const fileInput = ref<HTMLInputElement | null>(null)
 const messagesEl = ref<HTMLElement | null>(null)
 const collapsedSteps = reactive<Record<string, boolean>>({})
+const scrollPositions = new Map<string, number>()
+const pendingScrollRestoreId = ref('')
+let scrollRestoreTimer = 0
 
 const draftKey = computed(() => chat.activeId || 'new')
 const activeDraft = computed(() => getDraft(draftKey.value))
@@ -164,7 +174,9 @@ watch(
 
 watch(
   () => chat.activeId,
-  (activeId) => {
+  (activeId, previousId) => {
+    if (previousId) rememberConversationScroll(previousId)
+    if (activeId) queueScrollRestore(activeId)
     if (!activeId) return
     if (route.name === 'chat' || route.params.conversationId !== activeId) {
       router.replace(`/chat/${activeId}`)
@@ -173,10 +185,19 @@ watch(
 )
 
 watch(
-  () => chat.activeConversation?.messages.length || 0,
-  async () => {
+  () => ({
+    conversationId: chat.activeId,
+    messageCount: chat.activeConversation?.messages.length || 0,
+  }),
+  async (current, previous) => {
+    if (!current.conversationId) return
+    if (current.conversationId !== previous?.conversationId) return
+    if (current.messageCount <= (previous?.messageCount || 0)) return
     await nextTick()
-    messagesEl.value?.scrollTo({ top: messagesEl.value.scrollHeight, behavior: 'smooth' })
+    const container = messagesEl.value
+    if (!container) return
+    container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' })
+    scrollPositions.set(current.conversationId, container.scrollHeight)
   },
 )
 
@@ -243,6 +264,8 @@ const exportCurrent = () => {
 }
 
 onBeforeUnmount(() => {
+  rememberActiveScroll()
+  if (scrollRestoreTimer) window.clearTimeout(scrollRestoreTimer)
   Object.values(drafts).forEach((draft) => {
     if (draft.preview) URL.revokeObjectURL(draft.preview)
   })
@@ -277,8 +300,62 @@ const stepMeta = (step: AgentStep) => {
   return ''
 }
 
+const messageImageUrl = (message: ChatMessage) =>
+  message.attachments?.[0]?.url || message.imageUrl || ''
+
+const imageCaption = (message: ChatMessage) => {
+  const attachment = message.attachments?.[0]
+  return attachment?.name || message.sourceFileName || ''
+}
+
 const hasReportContent = (message: ChatMessage) => {
   if (!message.steps?.length) return true
   return message.content.trim() !== message.currentStatus?.trim()
+}
+
+const rememberActiveScroll = () => {
+  rememberConversationScroll(chat.activeId)
+}
+
+const rememberConversationScroll = (conversationId: string) => {
+  const container = messagesEl.value
+  if (!conversationId || !container) return
+  scrollPositions.set(conversationId, container.scrollTop)
+}
+
+const queueScrollRestore = (conversationId: string) => {
+  pendingScrollRestoreId.value = conversationId
+  if (scrollRestoreTimer) window.clearTimeout(scrollRestoreTimer)
+  scrollRestoreTimer = window.setTimeout(() => {
+    void nextTick(() => {
+      if (pendingScrollRestoreId.value === conversationId) {
+        restoreConversationScroll(conversationId)
+        pendingScrollRestoreId.value = ''
+      }
+    })
+  }, 230)
+}
+
+const restoreActiveScroll = () => {
+  const conversationId = pendingScrollRestoreId.value || chat.activeId
+  if (!conversationId) return
+  if (scrollRestoreTimer) {
+    window.clearTimeout(scrollRestoreTimer)
+    scrollRestoreTimer = 0
+  }
+  void nextTick(() => {
+    restoreConversationScroll(conversationId)
+    if (pendingScrollRestoreId.value === conversationId) {
+      pendingScrollRestoreId.value = ''
+    }
+  })
+}
+
+const restoreConversationScroll = (conversationId: string) => {
+  const container = messagesEl.value
+  if (!conversationId || !container) return
+  const savedTop = scrollPositions.get(conversationId)
+  const targetTop = savedTop ?? container.scrollHeight
+  container.scrollTo({ top: targetTop, behavior: 'auto' })
 }
 </script>

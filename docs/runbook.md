@@ -131,9 +131,10 @@ npm run build
 3. 刷新浏览器后，会话、昵称、偏好设置仍存在；若上传过图片，预览和导出内容应优先保留。
 4. 搜索会按标题、场景、风险等级、日期和消息内容过滤未归档会话。
 5. 会话三点菜单可重命名、归档、导出 PDF、删除；归档区在列表底部，可展开/收起，点击归档项会恢复该会话。
-6. `/stats` 显示本地会话统计并可导出 JSON；`/settings` 可修改昵称、默认流式响应、Agent 步骤展开偏好和 temperature。
+6. `/stats` 显示本地会话统计并可导出 JSON；重点检查完成率圆环、风险等级分布、近 7 天趋势和场景分布。`/settings` 可修改昵称、默认流式响应、Agent 步骤展开偏好和 temperature。
 7. 访问 `/register` 创建账号后回到 `/chat`；游客本地会话应迁移到新账号并同步到后端。访问 `/login` 登录已有账号时，只应恢复该账号自己的会话、昵称和偏好设置，不应继承游客或其他账号的会话。
 8. `/settings` 在登录后显示账号同步状态，可手动“立即同步”或退出登录；退出后回到本地模式。
+9. 登录状态下上传图片后，消息应显示图片；刷新页面后仍能显示；浏览器 `localStorage` 中该消息不应保存大体积 `data:image/...`，而应保存附件 URL/元数据。
 
 ## 常见问题
 
@@ -165,7 +166,7 @@ Django pipeline 是懒加载。第一次请求会初始化 RAG、连接 Neo4j/Mi
 
 ### 刷新后历史对话或图片丢失
 
-未登录时，会话、设置和简易用户身份保存在浏览器 `localStorage`，key 为 `ventilation-graph-rag:user-module:v2:guest`。登录用户按账号 ID 隔离保存到 `ventilation-graph-rag:user-module:v2:user:<userId>`，并同步到 Django `users.ConversationRecord`。已有账号登录不会自动继承游客或其他账号的会话；注册新账号时才迁移游客会话。上传图片会压缩为 data URL 保存；若图片过多导致 `localStorage` 超限，前端会自动降级为只保存文本和元数据。后续计划将图片改为后端附件引用。
+未登录时，会话、设置和简易用户身份保存在浏览器 `localStorage`，key 为 `ventilation-graph-rag:user-module:v2:guest`。登录用户按账号 ID 隔离保存到 `ventilation-graph-rag:user-module:v2:user:<userId>`，并同步到 Django `users.ConversationRecord`。已有账号登录不会自动继承游客或其他账号的会话；注册新账号时才迁移游客会话。游客上传图片会压缩为 data URL 保存；登录用户上传图片会写入后端 `ConversationAttachment`，本地和远端会话快照只保存附件 URL/元数据。若附件上传失败，前端会降级为本地 data URL，保证本次辨识能继续。
 
 ### 登录后同步失败
 

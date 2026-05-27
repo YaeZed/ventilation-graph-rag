@@ -10,11 +10,12 @@ from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.models import User
 from django.db import IntegrityError
 from django.http import JsonResponse
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
-from .models import ConversationRecord, UserProfile
+from .models import ConversationAttachment, ConversationRecord, UserProfile
 
 
 DEFAULT_SETTINGS = {
@@ -22,6 +23,7 @@ DEFAULT_SETTINGS = {
     "autoExpandSteps": True,
     "temperature": 0.2,
 }
+MAX_ATTACHMENT_SIZE = 8 * 1024 * 1024
 
 
 def _json_error(message: str, status: int = 400):
@@ -91,6 +93,26 @@ def _serialize_conversation(record: ConversationRecord):
     }
 
 
+def _serialize_attachment(attachment: ConversationAttachment, request):
+    file_url = request.build_absolute_uri(attachment.file.url) if attachment.file else ""
+    return {
+        "id": str(attachment.id),
+        "kind": "image",
+        "messageClientId": attachment.message_client_id or None,
+        "name": attachment.original_name,
+        "url": file_url,
+        "thumbnailUrl": file_url,
+        "size": attachment.size,
+        "mimeType": attachment.mime_type,
+        "createdAt": attachment.created_at.isoformat(),
+    }
+
+
+def _delete_attachment_file(attachment: ConversationAttachment):
+    if attachment.file:
+        attachment.file.delete(save=False)
+
+
 def _clean_text(value: Any, fallback: str, max_length: int):
     text = str(value or "").strip() or fallback
     return text[:max_length]
@@ -120,6 +142,20 @@ def _upsert_conversation(user, item: dict[str, Any]):
         user=user,
         client_id=client_id,
         defaults=payload,
+    )
+    return record
+
+
+def _get_or_create_conversation_for_attachment(user, client_id: str):
+    record, _ = ConversationRecord.objects.get_or_create(
+        user=user,
+        client_id=client_id,
+        defaults={
+            "title": "新建辨识",
+            "messages": [],
+            "client_created_at": timezone.now(),
+            "client_updated_at": timezone.now(),
+        },
     )
     return record
 
@@ -266,5 +302,75 @@ def delete_conversation_view(request, client_id: str):
     if auth_error:
         return auth_error
 
-    ConversationRecord.objects.filter(user=request.user, client_id=client_id).delete()
+    records = ConversationRecord.objects.filter(user=request.user, client_id=client_id)
+    for attachment in ConversationAttachment.objects.filter(user=request.user, conversation__in=records):
+        _delete_attachment_file(attachment)
+    records.delete()
+    return JsonResponse({"ok": True})
+
+
+@csrf_exempt
+@require_POST
+def upload_attachment_view(request, client_id: str):
+    auth_error = _require_auth(request)
+    if auth_error:
+        return auth_error
+
+    uploaded = request.FILES.get("image") or request.FILES.get("file")
+    if uploaded is None:
+        return _json_error("请上传图片文件")
+    mime_type = uploaded.content_type or ""
+    if not mime_type.startswith("image/"):
+        return _json_error("只支持图片附件")
+    if uploaded.size > MAX_ATTACHMENT_SIZE:
+        return _json_error("图片不能超过 8MB")
+
+    message_client_id = _clean_text(request.POST.get("messageClientId"), "", 80)
+    conversation = _get_or_create_conversation_for_attachment(request.user, client_id)
+    attachment = ConversationAttachment.objects.create(
+        user=request.user,
+        conversation=conversation,
+        message_client_id=message_client_id,
+        file=uploaded,
+        original_name=_clean_text(uploaded.name, "现场图片", 160),
+        mime_type=mime_type[:80],
+        size=uploaded.size,
+    )
+    if not conversation.preview_image_url:
+        conversation.preview_image_url = attachment.file.url
+        conversation.save(update_fields=["preview_image_url", "updated_at"])
+
+    return JsonResponse(
+        {"ok": True, "attachment": _serialize_attachment(attachment, request)},
+        json_dumps_params={"ensure_ascii": False},
+    )
+
+
+@require_GET
+def attachments_view(request, client_id: str):
+    auth_error = _require_auth(request)
+    if auth_error:
+        return auth_error
+
+    record = get_object_or_404(ConversationRecord, user=request.user, client_id=client_id)
+    attachments = record.attachments.order_by("created_at")
+    return JsonResponse(
+        {
+            "ok": True,
+            "attachments": [_serialize_attachment(attachment, request) for attachment in attachments],
+        },
+        json_dumps_params={"ensure_ascii": False},
+    )
+
+
+@csrf_exempt
+@require_http_methods(["DELETE", "POST"])
+def delete_attachment_view(request, attachment_id: int):
+    auth_error = _require_auth(request)
+    if auth_error:
+        return auth_error
+
+    attachment = get_object_or_404(ConversationAttachment, user=request.user, id=attachment_id)
+    _delete_attachment_file(attachment)
+    attachment.delete()
     return JsonResponse({"ok": True})

@@ -3,9 +3,9 @@
     <div class="auth-orbit" aria-hidden="true"></div>
     <section class="auth-card">
       <div class="auth-brand">
-        <span class="brand-mark">✦</span>
+        <BrandMark />
         <div>
-          <h1>煤矿通风隐患智能辨识</h1>
+          <h1>矿风眼</h1>
           <p>登录后同步会话、偏好设置和辨识记录。</p>
         </div>
       </div>
@@ -43,6 +43,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
+import BrandMark from '@/components/BrandMark.vue'
 import { useChatStore } from '@/stores/chat'
 
 const router = useRouter()
@@ -80,4 +81,3 @@ function buildGreeting(nickname: string) {
   return `欢迎回来，${nickname}。`
 }
 </script>
-

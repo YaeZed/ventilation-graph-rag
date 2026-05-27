@@ -3,18 +3,14 @@
 </template>
 
 <script setup lang="ts">
-import MarkdownIt from 'markdown-it'
+import { createSafeMarkdownRenderer } from '@/utils/markdown'
 import { computed } from 'vue'
 
 const props = defineProps<{
   content: string
 }>()
 
-const markdown = new MarkdownIt({
-  html: false,
-  linkify: true,
-  breaks: true,
-})
+const markdown = createSafeMarkdownRenderer()
 
 const renderedHtml = computed(() => markdown.render(props.content || ''))
 </script>

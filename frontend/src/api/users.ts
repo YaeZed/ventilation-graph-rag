@@ -1,4 +1,4 @@
-import type { Conversation, UserProfile, UserSettings } from '@/stores/chat'
+import type { ChatAttachment, Conversation, UserProfile, UserSettings } from '@/stores/chat'
 
 export type RemoteUser = {
   id: number
@@ -17,6 +17,12 @@ type UserResponse = {
 type ConversationsResponse = {
   ok: boolean
   conversations?: Conversation[]
+  error?: string
+}
+
+type AttachmentResponse = {
+  ok: boolean
+  attachment?: ChatAttachment
   error?: string
 }
 
@@ -105,6 +111,25 @@ export async function deleteRemoteConversation(id: string) {
   await parseOkResponse(response)
 }
 
+export async function uploadConversationAttachment(
+  conversationId: string,
+  file: File,
+  messageClientId: string,
+) {
+  const formData = new FormData()
+  formData.append('image', file)
+  formData.append('messageClientId', messageClientId)
+  const response = await fetch(
+    `${API_BASE}/api/users/conversations/${encodeURIComponent(conversationId)}/attachments/upload/`,
+    {
+      method: 'POST',
+      credentials: 'include',
+      body: formData,
+    },
+  )
+  return parseAttachmentResponse(response)
+}
+
 async function parseUserResponse(response: Response) {
   const payload = (await parseJson(response)) as UserResponse
   if (!response.ok || !payload.ok) {
@@ -126,6 +151,14 @@ async function parseOkResponse(response: Response) {
   if (!response.ok || !payload.ok) {
     throw new Error(payload.error || `HTTP ${response.status}`)
   }
+}
+
+async function parseAttachmentResponse(response: Response) {
+  const payload = (await parseJson(response)) as AttachmentResponse
+  if (!response.ok || !payload.ok || !payload.attachment) {
+    throw new Error(payload.error || `HTTP ${response.status}`)
+  }
+  return payload.attachment
 }
 
 async function parseJson(response: Response) {

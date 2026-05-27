@@ -14,4 +14,15 @@ urlpatterns = [
     path("conversations/", views.conversations_view, name="user_conversations"),
     path("conversations/sync/", views.sync_conversations_view, name="user_conversations_sync"),
     path("conversations/<str:client_id>/delete/", views.delete_conversation_view, name="user_conversation_delete"),
+    path(
+        "conversations/<str:client_id>/attachments/upload/",
+        views.upload_attachment_view,
+        name="user_attachment_upload",
+    ),
+    path(
+        "conversations/<str:client_id>/attachments/",
+        views.attachments_view,
+        name="user_attachments",
+    ),
+    path("attachments/<int:attachment_id>/delete/", views.delete_attachment_view, name="user_attachment_delete"),
 ]

@@ -57,6 +57,44 @@
 
 删除当前用户指定会话的后端快照。前端删除已登录账号下的会话时会调用该接口，避免下次同步把已删除会话重新拉回。
 
+### POST `/api/users/conversations/<conversationId>/attachments/upload/`
+
+上传当前用户某个会话下的图片附件。请求类型为 `multipart/form-data`，需要已登录。
+
+字段：
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `image` / `file` | 是 | 图片文件，最大 8MB |
+| `messageClientId` | 否 | 前端消息 ID，用于把附件关联到消息 |
+
+响应：
+
+```json
+{
+  "ok": true,
+  "attachment": {
+    "id": "1",
+    "kind": "image",
+    "messageClientId": "message-id",
+    "name": "现场图片.png",
+    "url": "http://127.0.0.1:8000/media/conversation_attachments/2026/05/27/a.png",
+    "thumbnailUrl": "http://127.0.0.1:8000/media/conversation_attachments/2026/05/27/a.png",
+    "size": 1024,
+    "mimeType": "image/png",
+    "createdAt": "2026-05-27T09:30:00+08:00"
+  }
+}
+```
+
+### GET `/api/users/conversations/<conversationId>/attachments/`
+
+返回当前用户指定会话的附件列表。
+
+### DELETE `/api/users/attachments/<attachmentId>/delete/`
+
+删除当前用户指定附件记录和本地 media 文件。
+
 ## POST `/api/chat/`
 
 文字问答，非流式返回。

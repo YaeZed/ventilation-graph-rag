@@ -3,9 +3,9 @@
     <div class="auth-orbit" aria-hidden="true"></div>
     <section class="auth-card">
       <div class="auth-brand">
-        <span class="brand-mark">✦</span>
+        <BrandMark />
         <div>
-          <h1>创建账号</h1>
+          <h1>创建矿风眼账号</h1>
           <p>注册后会自动把当前浏览器里的本地会话同步到账号。</p>
         </div>
       </div>
@@ -56,6 +56,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
+import BrandMark from '@/components/BrandMark.vue'
 import { useChatStore } from '@/stores/chat'
 
 const router = useRouter()

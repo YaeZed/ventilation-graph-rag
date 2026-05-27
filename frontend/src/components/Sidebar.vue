@@ -2,8 +2,8 @@
   <aside class="sidebar" :class="{ collapsed }">
     <div class="sidebar-top">
       <button class="brand-lockup" type="button" title="展开/收起菜单" @click="$emit('toggle')">
-        <span class="brand-mark" aria-hidden="true">✦</span>
-        <span class="sidebar-brand">Ventilation RAG</span>
+        <BrandMark />
+        <span class="sidebar-brand">矿风眼</span>
       </button>
       <button class="sidebar-toggle" type="button" title="展开/收起侧栏" @click="$emit('toggle')">
         <span aria-hidden="true">{{ collapsed ? '☰' : '☷' }}</span>
@@ -53,6 +53,7 @@
 
 <script setup lang="ts">
 import { RouterLink } from 'vue-router'
+import BrandMark from '@/components/BrandMark.vue'
 import ConversationList from '@/components/ConversationList.vue'
 import NewChatButton from '@/components/NewChatButton.vue'
 import UserMiniCard from '@/components/UserMiniCard.vue'
