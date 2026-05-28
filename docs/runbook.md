@@ -37,6 +37,10 @@ MILVUS_PORT=19530
 QWEN_VL_MODEL=qwen3.5-omni-plus
 DJANGO_DEBUG=1
 DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1
+DJANGO_CSRF_TRUSTED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+DJANGO_SESSION_COOKIE_AGE=604800
+ACCOUNT_LOGIN_FAILURE_LIMIT=5
+ACCOUNT_LOGIN_LOCKOUT_SECONDS=300
 VENTILATION_PIPELINE_FORCE_REBUILD=0
 CELERY_BROKER_URL=redis://localhost:6379/0
 CELERY_RESULT_BACKEND=redis://localhost:6379/1
@@ -131,10 +135,13 @@ npm run build
 3. 刷新浏览器后，会话、昵称、偏好设置仍存在；若上传过图片，预览和导出内容应优先保留。
 4. 搜索会按标题、场景、风险等级、日期和消息内容过滤未归档会话。
 5. 会话三点菜单可重命名、归档、导出 PDF、删除；归档区在列表底部，可展开/收起，点击归档项会恢复该会话。
-6. `/stats` 显示会话统计并可导出 JSON；游客模式显示“本地统计”，登录后应显示“后端统计”或后端加载失败时回退本地统计。重点检查完成率圆环、风险等级分布、近 7 天趋势和场景分布。`/settings` 可修改昵称、默认流式响应、Agent 步骤展开偏好和 temperature。
+6. `/stats` 显示会话统计并可导出 JSON；游客模式显示“本地统计”，登录后应显示“个人后端统计”，选择团队后应显示“团队统计”。后端加载失败时回退本地统计。重点检查完成率圆环、风险等级分布、近 7 天趋势和场景分布。`/settings` 可修改昵称、默认流式响应、Agent 步骤展开偏好和 temperature。
 7. 访问 `/register` 创建账号后回到 `/chat`；游客本地会话应迁移到新账号并同步到后端。访问 `/login` 登录已有账号时，只应恢复该账号自己的会话、昵称和偏好设置，不应继承游客或其他账号的会话。
 8. `/settings` 在登录后显示账号同步状态，可手动“立即同步”或退出登录；退出后回到本地模式。
 9. 登录状态下上传图片后，消息应显示图片；刷新页面后仍能显示；浏览器 `localStorage` 中该消息不应保存大体积 `data:image/...`，而应保存附件 URL/元数据。
+10. 登录后在 `/settings` 创建团队并按用户名添加成员；回到侧边栏对话三点菜单，通过“归属团队”子菜单把当前会话切到团队。子菜单应固定显示在主菜单右侧，移动鼠标到子菜单时不应消失。成员账号刷新后，“最近对话”下方的“团队对话”应能看到并只读打开这条会话，副标题应显示团队名和放入者身份名。再到 `/stats` 选择该团队，团队统计应包含显式分配到团队的会话。非团队成员访问带 `teamId` 的统计接口和团队会话接口应返回 403。
+11. `/settings` 登录后应显示“账号安全”记录；列表高度约为 5 条记录并可滚动。连续输错同一账号密码 5 次后，登录接口应返回 429 并提示稍后再试。
+12. `/settings` 的团队选择、成员角色选择和 `/stats` 的统计范围选择应使用同一套浅色下拉样式；鼠标悬停和选中态不应出现系统蓝色或白字空白。
 
 ## 常见问题
 
@@ -176,11 +183,19 @@ Django pipeline 是懒加载。第一次请求会初始化 RAG、连接 Neo4j/Mi
 D:\Miniconda\envs\ventilation-identify-system\python.exe web_backend\manage.py migrate
 ```
 
-再检查 `/api/users/me/` 是否返回当前用户。开发期账号使用 Django session，同源 Vite 代理会携带 cookie；若改成跨域部署，需要补充 CSRF/CORS/session cookie 配置。
+再检查 `/api/users/me/` 是否返回当前用户。开发期账号使用 Django session，同源 Vite 代理会携带 cookie；写请求必须先访问 `/api/users/auth/csrf/` 并携带 `X-CSRFToken`。若改成跨域部署，需要把前端源加入 `DJANGO_CSRF_TRUSTED_ORIGINS`，并重新评估 `SameSite`、`Secure` 和 CORS 策略。
 
 ### 登录后统计不更新
 
-登录用户的 `/stats` 会调用 `GET /api/users/stats/summary/?days=7`。先确认 `/settings` 手动同步成功，再用浏览器网络面板或 Django 日志检查该接口是否返回 `ok: true`。统计聚合来自后端 `ConversationRecord`，如果前端刚生成报告但还未同步到后端，统计页会短暂显示旧数据或回退本地统计。
+登录用户的 `/stats` 会调用 `GET /api/users/stats/summary/?days=7`；团队范围会额外携带 `teamId`。先确认 `/settings` 手动同步成功，再用浏览器网络面板或 Django 日志检查该接口是否返回 `ok: true`。统计聚合来自后端 `ConversationRecord`，如果前端刚生成报告但还未同步到后端，统计页会短暂显示旧数据或回退本地统计。团队统计只包含显式分配到该团队的会话，不会自动包含个人空间历史记录。
+
+### 团队接口返回 403
+
+先检查当前登录账号是否在 `GET /api/users/teams/` 返回列表内。`teamId` 统计、成员列表、会话分配都要求当前用户已加入团队；添加/调整成员需要 `owner` 或 `admin`；删除团队只能由 `owner` 执行。
+
+### 团队成员看不到团队对话
+
+先确认创建者已经通过对话三点菜单的“归属团队”把会话显式分配到团队。团队成员登录后会在刷新团队列表时加载 `GET /api/users/teams/<teamId>/conversations/`；这些记录显示在侧边栏“团队对话”下拉中。别人的团队会话是只读浏览，不会出现在“最近对话”的个人列表里。
 
 ### 归档对话找不到
 

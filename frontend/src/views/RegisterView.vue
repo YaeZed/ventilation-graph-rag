@@ -25,7 +25,7 @@
             v-model="password"
             autocomplete="new-password"
             type="password"
-            placeholder="至少 6 位"
+            placeholder="至少 8 位，避免常见密码"
           />
         </label>
         <label>

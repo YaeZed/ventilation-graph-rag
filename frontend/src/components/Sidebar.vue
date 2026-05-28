@@ -36,6 +36,7 @@
 
     <ConversationList
       @select="$emit('select', $event)"
+      @select-team="$emit('selectTeam', $event)"
       @archive="$emit('archive', $event)"
       @delete="$emit('delete', $event)"
       @restore="$emit('restore', $event)"
@@ -69,6 +70,7 @@ defineEmits<{
   toggle: []
   create: []
   select: [id: string]
+  selectTeam: [id: string]
   archive: [id: string]
   delete: [id: string]
   restore: [id: string]

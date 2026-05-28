@@ -2,20 +2,33 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timedelta
 from typing import Any
 
+from django.conf import settings
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.models import User
-from django.db import IntegrityError
+from django.contrib.auth.password_validation import validate_password
+from django.core.cache import cache
+from django.core.exceptions import ValidationError
+from django.db import IntegrityError, transaction
 from django.http import JsonResponse
+from django.middleware.csrf import get_token
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
-from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
-from .models import ConversationAttachment, ConversationRecord, UserProfile
+from .models import (
+    ConversationAttachment,
+    ConversationRecord,
+    SecurityEvent,
+    Team,
+    TeamMembership,
+    UserProfile,
+)
 
 
 DEFAULT_SETTINGS = {
@@ -29,6 +42,103 @@ HAZARD_TONES = {
     "中风险": "warning",
     "低风险": "success",
 }
+TEAM_ROLES = {
+    TeamMembership.ROLE_OWNER,
+    TeamMembership.ROLE_ADMIN,
+    TeamMembership.ROLE_MEMBER,
+}
+TEAM_ADMIN_ROLES = {
+    TeamMembership.ROLE_OWNER,
+    TeamMembership.ROLE_ADMIN,
+}
+def _client_ip(request):
+    forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR", "")
+    if forwarded_for:
+        return forwarded_for.split(",", 1)[0].strip()[:45]
+    return str(request.META.get("REMOTE_ADDR") or "")[:45]
+
+
+def _security_cache_key(prefix: str, *parts: Any):
+    raw = ":".join(str(part or "").lower() for part in parts)
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return f"users:security:{prefix}:{digest}"
+
+
+def _login_throttle_key(request, username: str):
+    return _security_cache_key("login", _client_ip(request), username.strip().lower())
+
+
+def _register_rate_key(request):
+    return _security_cache_key("register", _client_ip(request))
+
+
+def _login_retry_wait_seconds(key: str):
+    state = cache.get(key) or {}
+    locked_until = float(state.get("locked_until") or 0)
+    now = timezone.now().timestamp()
+    if locked_until > now:
+        return max(1, int(locked_until - now))
+    return 0
+
+
+def _record_login_failure(key: str):
+    limit = max(1, int(getattr(settings, "ACCOUNT_LOGIN_FAILURE_LIMIT", 5)))
+    lockout_seconds = max(30, int(getattr(settings, "ACCOUNT_LOGIN_LOCKOUT_SECONDS", 300)))
+    state = cache.get(key) or {}
+    count = int(state.get("count") or 0) + 1
+    locked_until = timezone.now().timestamp() + lockout_seconds if count >= limit else 0
+    cache.set(key, {"count": count, "locked_until": locked_until}, timeout=lockout_seconds)
+    return count, locked_until
+
+
+def _clear_login_failures(key: str):
+    cache.delete(key)
+
+
+def _consume_register_attempt(request):
+    limit = max(1, int(getattr(settings, "ACCOUNT_REGISTER_RATE_LIMIT", 5)))
+    window_seconds = max(60, int(getattr(settings, "ACCOUNT_REGISTER_WINDOW_SECONDS", 600)))
+    key = _register_rate_key(request)
+    now = timezone.now().timestamp()
+    state = cache.get(key) or {}
+    started_at = float(state.get("started_at") or now)
+    count = int(state.get("count") or 0)
+    if now - started_at >= window_seconds:
+        started_at = now
+        count = 0
+    if count >= limit:
+        return max(1, int(window_seconds - (now - started_at)))
+    cache.set(key, {"started_at": started_at, "count": count + 1}, timeout=window_seconds)
+    return 0
+
+
+def _record_security_event(
+    request,
+    event_type: str,
+    user=None,
+    username: str = "",
+    metadata: dict[str, Any] | None = None,
+):
+    SecurityEvent.objects.create(
+        user=user,
+        username=(username or getattr(user, "username", "") or "")[:150],
+        event_type=event_type,
+        ip_address=_client_ip(request),
+        user_agent=str(request.META.get("HTTP_USER_AGENT") or "")[:240],
+        metadata=metadata or {},
+    )
+
+
+def _serialize_security_event(event: SecurityEvent):
+    return {
+        "id": event.id,
+        "type": event.event_type,
+        "username": event.username,
+        "ipAddress": event.ip_address,
+        "userAgent": event.user_agent,
+        "metadata": event.metadata or {},
+        "createdAt": event.created_at.isoformat(),
+    }
 
 
 def _json_error(message: str, status: int = 400):
@@ -81,10 +191,10 @@ def _parse_client_datetime(value: str | None):
     return parsed
 
 
-def _serialize_conversation(record: ConversationRecord):
+def _serialize_conversation(record: ConversationRecord, include_owner: bool = False):
     created_at = record.client_created_at or record.created_at
     updated_at = record.client_updated_at or record.updated_at
-    return {
+    payload = {
         "id": record.client_id,
         "title": record.title,
         "messages": record.messages or [],
@@ -95,7 +205,20 @@ def _serialize_conversation(record: ConversationRecord):
         "isArchived": record.is_archived,
         "previewImageUrl": record.preview_image_url or None,
         "isTitleManual": record.is_title_manual,
+        "teamId": str(record.team_id) if record.team_id else None,
+        "teamName": record.team.name if record.team_id and record.team else None,
     }
+    if include_owner:
+        profile = _profile_for(record.user)
+        nickname = profile.nickname or record.user.first_name or record.user.username
+        payload["owner"] = {
+            "id": record.user_id,
+            "username": record.user.username,
+            "nickname": nickname,
+            "avatarText": profile.avatar_text or nickname[:2] or "用",
+        }
+        payload["isOwnedByCurrentUser"] = False
+    return payload
 
 
 def _serialize_attachment(attachment: ConversationAttachment, request):
@@ -111,6 +234,84 @@ def _serialize_attachment(attachment: ConversationAttachment, request):
         "mimeType": attachment.mime_type,
         "createdAt": attachment.created_at.isoformat(),
     }
+
+
+def _membership_for(user, team: Team):
+    return TeamMembership.objects.filter(user=user, team=team).first()
+
+
+def _serialize_team(team: Team, membership: TeamMembership | None = None):
+    role = membership.role if membership else TeamMembership.ROLE_MEMBER
+    return {
+        "id": str(team.id),
+        "name": team.name,
+        "description": team.description,
+        "role": role,
+        "memberCount": team.memberships.count(),
+        "createdAt": team.created_at.isoformat(),
+        "updatedAt": team.updated_at.isoformat(),
+    }
+
+
+def _serialize_team_member(membership: TeamMembership):
+    profile = _profile_for(membership.user)
+    nickname = profile.nickname or membership.user.first_name or membership.user.username
+    return {
+        "id": membership.user.id,
+        "username": membership.user.username,
+        "nickname": nickname,
+        "avatarText": profile.avatar_text or nickname[:2] or "用",
+        "role": membership.role,
+        "joinedAt": membership.joined_at.isoformat(),
+    }
+
+
+def _parse_team_id(value: Any):
+    if value in (None, "", "personal", "null"):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _team_for_user(user, team_id: Any):
+    parsed_id = _parse_team_id(team_id)
+    if parsed_id is None:
+        return None
+    return Team.objects.filter(id=parsed_id, memberships__user=user).first()
+
+
+def _require_team_membership(request, team_id: Any):
+    parsed_id = _parse_team_id(team_id)
+    if parsed_id is None:
+        return None, None, _json_error("团队不存在", status=404)
+    membership = (
+        TeamMembership.objects.select_related("team", "user")
+        .filter(team_id=parsed_id, user=request.user)
+        .first()
+    )
+    if membership is None:
+        return None, None, _json_error("无权访问该团队", status=403)
+    return membership.team, membership, None
+
+
+def _require_team_admin(request, team_id: Any):
+    team, membership, error = _require_team_membership(request, team_id)
+    if error:
+        return None, None, error
+    if membership.role not in TEAM_ADMIN_ROLES:
+        return None, None, _json_error("只有团队所有者或管理员可以执行该操作", status=403)
+    return team, membership, None
+
+
+def _team_scope_from_request(request):
+    raw_team_id = request.GET.get("teamId")
+    if raw_team_id in (None, "", "personal", "null"):
+        return None, None
+    team, _, error = _require_team_membership(request, raw_team_id)
+    return team, error
 
 
 def _normalize_hazard_label(value: Any):
@@ -182,8 +383,11 @@ def _build_recent_days(records, days: int):
     return [{"date": date, "count": count} for date, count in buckets.items()]
 
 
-def _build_stats_payload(user, days: int = 7):
-    records = list(user.conversation_records.all())
+def _build_stats_payload(user, days: int = 7, team: Team | None = None):
+    if team is None:
+        records = list(user.conversation_records.filter(team__isnull=True))
+    else:
+        records = list(team.conversation_records.select_related("user").all())
     active_records = [record for record in records if not record.is_archived]
     active_records.sort(key=_record_updated_at, reverse=True)
 
@@ -282,6 +486,8 @@ def _upsert_conversation(user, item: dict[str, Any]):
         "client_created_at": _parse_client_datetime(item.get("createdAt")),
         "client_updated_at": _parse_client_datetime(item.get("updatedAt")),
     }
+    if "teamId" in item:
+        payload["team"] = _team_for_user(user, item.get("teamId"))
     record, _ = ConversationRecord.objects.update_or_create(
         user=user,
         client_id=client_id,
@@ -310,20 +516,46 @@ def _require_auth(request):
     return None
 
 
-@csrf_exempt
+@ensure_csrf_cookie
+@require_GET
+def csrf_view(request):
+    return JsonResponse({"ok": True, "csrfToken": get_token(request)})
+
+
 @require_POST
 def register_view(request):
     payload = _load_json_body(request)
     if payload is None:
         return _json_error("请求体必须是 JSON")
 
+    retry_after = _consume_register_attempt(request)
+    if retry_after:
+        _record_security_event(
+            request,
+            SecurityEvent.EVENT_REGISTER_THROTTLED,
+            username=str((payload or {}).get("username") or ""),
+            metadata={"retryAfterSeconds": retry_after},
+        )
+        response = _json_error(f"注册请求过于频繁，请 {retry_after} 秒后再试", status=429)
+        response["Retry-After"] = str(retry_after)
+        return response
+
     username = _clean_text(payload.get("username"), "", 150)
     password = str(payload.get("password") or "")
     nickname = _clean_text(payload.get("nickname"), username, 32)
     if not username or not password:
         return _json_error("请填写用户名和密码")
-    if len(password) < 6:
-        return _json_error("密码至少 6 位")
+
+    try:
+        validate_password(password, user=User(username=username, first_name=nickname))
+    except ValidationError as exc:
+        _record_security_event(
+            request,
+            SecurityEvent.EVENT_PASSWORD_REJECTED,
+            username=username,
+            metadata={"messages": list(exc.messages)},
+        )
+        return _json_error("；".join(exc.messages), status=400)
 
     try:
         user = User.objects.create_user(username=username, password=password, first_name=nickname)
@@ -337,10 +569,10 @@ def register_view(request):
         settings={**DEFAULT_SETTINGS, **(payload.get("settings") or {})},
     )
     login(request, user)
+    _record_security_event(request, SecurityEvent.EVENT_REGISTER, user=user, username=username)
     return JsonResponse({"ok": True, "user": _serialize_user(user)}, json_dumps_params={"ensure_ascii": False})
 
 
-@csrf_exempt
 @require_POST
 def login_view(request):
     payload = _load_json_body(request)
@@ -349,21 +581,57 @@ def login_view(request):
 
     username = _clean_text(payload.get("username"), "", 150)
     password = str(payload.get("password") or "")
+    if not username or not password:
+        return _json_error("请填写用户名和密码")
+
+    throttle_key = _login_throttle_key(request, username)
+    retry_after = _login_retry_wait_seconds(throttle_key)
+    if retry_after:
+        target_user = User.objects.filter(username=username).first()
+        _record_security_event(
+            request,
+            SecurityEvent.EVENT_LOGIN_THROTTLED,
+            user=target_user,
+            username=username,
+            metadata={"retryAfterSeconds": retry_after},
+        )
+        response = _json_error(f"尝试次数过多，请 {retry_after} 秒后再试", status=429)
+        response["Retry-After"] = str(retry_after)
+        return response
+
     user = authenticate(request, username=username, password=password)
     if user is None:
+        count, locked_until = _record_login_failure(throttle_key)
+        target_user = User.objects.filter(username=username).first()
+        _record_security_event(
+            request,
+            SecurityEvent.EVENT_LOGIN_FAILURE,
+            user=target_user,
+            username=username,
+            metadata={"failureCount": count, "locked": bool(locked_until)},
+        )
         return _json_error("用户名或密码不正确", status=401)
 
+    _clear_login_failures(throttle_key)
     login(request, user)
+    _record_security_event(request, SecurityEvent.EVENT_LOGIN_SUCCESS, user=user, username=username)
     return JsonResponse({"ok": True, "user": _serialize_user(user)}, json_dumps_params={"ensure_ascii": False})
 
 
-@csrf_exempt
 @require_POST
 def logout_view(request):
+    if request.user.is_authenticated:
+        _record_security_event(
+            request,
+            SecurityEvent.EVENT_LOGOUT,
+            user=request.user,
+            username=request.user.username,
+        )
     logout(request)
     return JsonResponse({"ok": True})
 
 
+@ensure_csrf_cookie
 @require_GET
 def me_view(request):
     if not request.user.is_authenticated:
@@ -371,7 +639,19 @@ def me_view(request):
     return JsonResponse({"ok": True, "user": _serialize_user(request.user)}, json_dumps_params={"ensure_ascii": False})
 
 
-@csrf_exempt
+@require_GET
+def security_events_view(request):
+    auth_error = _require_auth(request)
+    if auth_error:
+        return auth_error
+
+    events = request.user.security_events.order_by("-created_at")[:20]
+    return JsonResponse(
+        {"ok": True, "events": [_serialize_security_event(event) for event in events]},
+        json_dumps_params={"ensure_ascii": False},
+    )
+
+
 @require_http_methods(["PATCH", "POST"])
 def profile_view(request):
     auth_error = _require_auth(request)
@@ -400,13 +680,209 @@ def profile_view(request):
     return JsonResponse({"ok": True, "user": _serialize_user(request.user)}, json_dumps_params={"ensure_ascii": False})
 
 
+@require_http_methods(["GET", "POST"])
+def teams_view(request):
+    auth_error = _require_auth(request)
+    if auth_error:
+        return auth_error
+
+    if request.method == "GET":
+        memberships = (
+            TeamMembership.objects.select_related("team")
+            .filter(user=request.user)
+            .order_by("team__name", "team_id")
+        )
+        return JsonResponse(
+            {"ok": True, "teams": [_serialize_team(item.team, item) for item in memberships]},
+            json_dumps_params={"ensure_ascii": False},
+        )
+
+    payload = _load_json_body(request)
+    if payload is None:
+        return _json_error("请求体必须是 JSON")
+
+    name = _clean_text(payload.get("name"), "", 80)
+    description = _clean_text(payload.get("description"), "", 240)
+    if not name:
+        return _json_error("请填写团队名称")
+
+    with transaction.atomic():
+        team = Team.objects.create(name=name, description=description, created_by=request.user)
+        membership = TeamMembership.objects.create(
+            team=team,
+            user=request.user,
+            role=TeamMembership.ROLE_OWNER,
+        )
+
+    return JsonResponse(
+        {"ok": True, "team": _serialize_team(team, membership)},
+        status=201,
+        json_dumps_params={"ensure_ascii": False},
+    )
+
+
+@require_http_methods(["PATCH", "DELETE"])
+def team_detail_view(request, team_id: int):
+    auth_error = _require_auth(request)
+    if auth_error:
+        return auth_error
+
+    team, membership, error = _require_team_admin(request, team_id)
+    if error:
+        return error
+
+    if request.method == "DELETE":
+        if membership.role != TeamMembership.ROLE_OWNER:
+            return _json_error("只有团队所有者可以删除团队", status=403)
+        team.delete()
+        return JsonResponse({"ok": True})
+
+    payload = _load_json_body(request)
+    if payload is None:
+        return _json_error("请求体必须是 JSON")
+
+    name = payload.get("name")
+    description = payload.get("description")
+    if name is not None:
+        team.name = _clean_text(name, team.name, 80)
+    if description is not None:
+        team.description = _clean_text(description, "", 240)
+    if not team.name:
+        return _json_error("请填写团队名称")
+    team.save(update_fields=["name", "description", "updated_at"])
+
+    return JsonResponse(
+        {"ok": True, "team": _serialize_team(team, membership)},
+        json_dumps_params={"ensure_ascii": False},
+    )
+
+
+@require_http_methods(["GET", "POST"])
+def team_members_view(request, team_id: int):
+    auth_error = _require_auth(request)
+    if auth_error:
+        return auth_error
+
+    team, membership, error = _require_team_membership(request, team_id)
+    if error:
+        return error
+
+    if request.method == "GET":
+        members = (
+            team.memberships.select_related("user", "user__profile")
+            .order_by("role", "user__username")
+        )
+        return JsonResponse(
+            {"ok": True, "members": [_serialize_team_member(item) for item in members]},
+            json_dumps_params={"ensure_ascii": False},
+        )
+
+    if membership.role not in TEAM_ADMIN_ROLES:
+        return _json_error("只有团队所有者或管理员可以添加成员", status=403)
+
+    payload = _load_json_body(request)
+    if payload is None:
+        return _json_error("请求体必须是 JSON")
+
+    username = _clean_text(payload.get("username"), "", 150)
+    role = str(payload.get("role") or TeamMembership.ROLE_MEMBER)
+    if role not in (TeamMembership.ROLE_ADMIN, TeamMembership.ROLE_MEMBER):
+        role = TeamMembership.ROLE_MEMBER
+    if not username:
+        return _json_error("请填写成员用户名")
+
+    target_user = User.objects.filter(username=username).first()
+    if target_user is None:
+        return _json_error("用户不存在", status=404)
+
+    target_membership, created = TeamMembership.objects.get_or_create(
+        team=team,
+        user=target_user,
+        defaults={"role": role},
+    )
+    if not created and target_membership.role != TeamMembership.ROLE_OWNER:
+        target_membership.role = role
+        target_membership.save(update_fields=["role"])
+
+    return JsonResponse(
+        {"ok": True, "member": _serialize_team_member(target_membership)},
+        status=201 if created else 200,
+        json_dumps_params={"ensure_ascii": False},
+    )
+
+
+@require_GET
+def team_conversations_view(request, team_id: int):
+    auth_error = _require_auth(request)
+    if auth_error:
+        return auth_error
+
+    team, _, error = _require_team_membership(request, team_id)
+    if error:
+        return error
+
+    records = (
+        team.conversation_records.select_related("team", "user", "user__profile")
+        .filter(is_archived=False)
+        .order_by("-client_updated_at", "-updated_at")
+    )
+    conversations = []
+    for record in records:
+        item = _serialize_conversation(record, include_owner=True)
+        item["isOwnedByCurrentUser"] = record.user_id == request.user.id
+        conversations.append(item)
+    return JsonResponse(
+        {"ok": True, "team": _serialize_team(team, _membership_for(request.user, team)), "conversations": conversations},
+        json_dumps_params={"ensure_ascii": False},
+    )
+
+
+@require_http_methods(["PATCH", "DELETE"])
+def team_member_detail_view(request, team_id: int, user_id: int):
+    auth_error = _require_auth(request)
+    if auth_error:
+        return auth_error
+
+    team, membership, error = _require_team_membership(request, team_id)
+    if error:
+        return error
+
+    target_membership = get_object_or_404(TeamMembership, team=team, user_id=user_id)
+    is_self = target_membership.user_id == request.user.id
+    can_manage = membership.role in TEAM_ADMIN_ROLES
+    if not can_manage and not is_self:
+        return _json_error("无权管理该成员", status=403)
+    if target_membership.role == TeamMembership.ROLE_OWNER:
+        return _json_error("不能修改或移除团队所有者", status=403)
+
+    if request.method == "DELETE":
+        target_membership.delete()
+        return JsonResponse({"ok": True})
+
+    if not can_manage:
+        return _json_error("只有团队所有者或管理员可以修改角色", status=403)
+
+    payload = _load_json_body(request)
+    if payload is None:
+        return _json_error("请求体必须是 JSON")
+    role = str(payload.get("role") or TeamMembership.ROLE_MEMBER)
+    if role not in (TeamMembership.ROLE_ADMIN, TeamMembership.ROLE_MEMBER):
+        return _json_error("角色只能是 admin 或 member")
+    target_membership.role = role
+    target_membership.save(update_fields=["role"])
+    return JsonResponse(
+        {"ok": True, "member": _serialize_team_member(target_membership)},
+        json_dumps_params={"ensure_ascii": False},
+    )
+
+
 @require_GET
 def conversations_view(request):
     auth_error = _require_auth(request)
     if auth_error:
         return auth_error
 
-    records = request.user.conversation_records.order_by("-client_updated_at", "-updated_at")
+    records = request.user.conversation_records.select_related("team").order_by("-client_updated_at", "-updated_at")
     return JsonResponse(
         {"ok": True, "conversations": [_serialize_conversation(record) for record in records]},
         json_dumps_params={"ensure_ascii": False},
@@ -419,9 +895,12 @@ def stats_summary_view(request):
     if auth_error:
         return auth_error
 
+    team, team_error = _team_scope_from_request(request)
+    if team_error:
+        return team_error
     days = _parse_positive_int(request.GET.get("days"), 7)
     return JsonResponse(
-        {"ok": True, "stats": _build_stats_payload(request.user, days)},
+        {"ok": True, "stats": _build_stats_payload(request.user, days, team=team)},
         json_dumps_params={"ensure_ascii": False},
     )
 
@@ -432,8 +911,14 @@ def stats_trends_view(request):
     if auth_error:
         return auth_error
 
+    team, team_error = _team_scope_from_request(request)
+    if team_error:
+        return team_error
     days = _parse_positive_int(request.GET.get("days"), 7)
-    records = list(request.user.conversation_records.filter(is_archived=False))
+    if team is None:
+        records = list(request.user.conversation_records.filter(team__isnull=True, is_archived=False))
+    else:
+        records = list(team.conversation_records.filter(is_archived=False))
     return JsonResponse(
         {"ok": True, "trends": _build_recent_days(records, days)},
         json_dumps_params={"ensure_ascii": False},
@@ -446,13 +931,15 @@ def stats_hazards_view(request):
     if auth_error:
         return auth_error
 
+    team, team_error = _team_scope_from_request(request)
+    if team_error:
+        return team_error
     return JsonResponse(
-        {"ok": True, "hazards": _build_stats_payload(request.user)["hazardCounts"]},
+        {"ok": True, "hazards": _build_stats_payload(request.user, team=team)["hazardCounts"]},
         json_dumps_params={"ensure_ascii": False},
     )
 
 
-@csrf_exempt
 @require_POST
 def sync_conversations_view(request):
     auth_error = _require_auth(request)
@@ -471,14 +958,13 @@ def sync_conversations_view(request):
         if isinstance(item, dict):
             _upsert_conversation(request.user, item)
 
-    records = request.user.conversation_records.order_by("-client_updated_at", "-updated_at")
+    records = request.user.conversation_records.select_related("team").order_by("-client_updated_at", "-updated_at")
     return JsonResponse(
         {"ok": True, "conversations": [_serialize_conversation(record) for record in records]},
         json_dumps_params={"ensure_ascii": False},
     )
 
 
-@csrf_exempt
 @require_http_methods(["DELETE", "POST"])
 def delete_conversation_view(request, client_id: str):
     auth_error = _require_auth(request)
@@ -492,7 +978,32 @@ def delete_conversation_view(request, client_id: str):
     return JsonResponse({"ok": True})
 
 
-@csrf_exempt
+@require_http_methods(["PATCH", "POST"])
+def conversation_team_view(request, client_id: str):
+    auth_error = _require_auth(request)
+    if auth_error:
+        return auth_error
+
+    payload = _load_json_body(request)
+    if payload is None:
+        return _json_error("请求体必须是 JSON")
+
+    raw_team_id = payload.get("teamId")
+    team = None
+    if raw_team_id not in (None, "", "personal", "null"):
+        team = _team_for_user(request.user, raw_team_id)
+        if team is None:
+            return _json_error("无权分配到该团队", status=403)
+
+    record = get_object_or_404(ConversationRecord, user=request.user, client_id=client_id)
+    record.team = team
+    record.save(update_fields=["team", "updated_at"])
+    return JsonResponse(
+        {"ok": True, "conversation": _serialize_conversation(record)},
+        json_dumps_params={"ensure_ascii": False},
+    )
+
+
 @require_POST
 def upload_attachment_view(request, client_id: str):
     auth_error = _require_auth(request)
@@ -546,7 +1057,6 @@ def attachments_view(request, client_id: str):
     )
 
 
-@csrf_exempt
 @require_http_methods(["DELETE", "POST"])
 def delete_attachment_view(request, attachment_id: int):
     auth_error = _require_auth(request)

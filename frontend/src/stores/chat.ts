@@ -1,16 +1,32 @@
 import { sendImageMessage, sendTextMessage, streamMessage, type StreamStepEvent } from '@/api/chat'
 import {
+  addTeamMember,
+  assignRemoteConversationTeam,
+  createTeam,
+  deleteTeam,
   deleteRemoteConversation,
+  fetchSecurityEvents,
+  fetchTeamConversations,
+  fetchTeamMembers,
+  fetchTeams,
   fetchUserStatsSummary,
   fetchRemoteConversations,
   getCurrentUser,
   loginUser,
   logoutUser,
+  removeTeamMember,
   registerUser,
   syncRemoteConversations,
+  updateTeam,
+  updateTeamMemberRole,
   updateRemoteProfile,
   uploadConversationAttachment,
+  type RemoteTeam,
+  type RemoteTeamMember,
+  type RemoteSecurityEvent,
   type RemoteUser,
+  type TeamConversation,
+  type TeamRole,
 } from '@/api/users'
 import { createSafeMarkdownRenderer } from '@/utils/markdown'
 import { defineStore } from 'pinia'
@@ -64,7 +80,14 @@ export type Conversation = {
   previewImageUrl?: string
   previewAttachmentId?: string
   isTitleManual?: boolean
+  teamId?: string | null
+  teamName?: string | null
 }
+
+export type Team = RemoteTeam
+export type TeamMember = RemoteTeamMember
+export type SecurityEvent = RemoteSecurityEvent
+export type SharedTeamConversation = TeamConversation
 
 export type UserProfile = {
   nickname: string
@@ -80,6 +103,7 @@ export type UserSettings = {
 export type AuthStatus = 'checking' | 'guest' | 'authenticated'
 export type SyncStatus = 'idle' | 'syncing' | 'synced' | 'error'
 export type StatsStatus = 'idle' | 'loading' | 'ready' | 'error'
+export type TeamStatus = 'idle' | 'loading' | 'ready' | 'error'
 
 type StoredChatState = {
   conversations?: Conversation[]
@@ -87,6 +111,7 @@ type StoredChatState = {
   userProfile?: Partial<UserProfile>
   settings?: Partial<UserSettings>
   ownerUserId?: number | null
+  statsScopeTeamId?: string
 }
 
 export type ChatStats = {
@@ -160,7 +185,7 @@ const toTimestamp = (value?: string) => {
   return Number.isFinite(time) ? time : 0
 }
 
-const sortByUpdatedAt = (items: Conversation[]) =>
+const sortByUpdatedAt = <T extends Conversation>(items: T[]) =>
   [...items].sort((left, right) => toTimestamp(right.updatedAt) - toTimestamp(left.updatedAt))
 
 export const useChatStore = defineStore('chat', () => {
@@ -179,6 +204,16 @@ export const useChatStore = defineStore('chat', () => {
   const statsStatus = ref<StatsStatus>('idle')
   const statsError = ref('')
   const remoteStats = ref<ChatStats | null>(null)
+  const teams = ref<Team[]>([])
+  const teamMembers = ref<Record<string, TeamMember[]>>({})
+  const teamConversations = ref<Record<string, SharedTeamConversation[]>>({})
+  const activeTeamConversation = ref<SharedTeamConversation | null>(null)
+  const teamStatus = ref<TeamStatus>('idle')
+  const teamError = ref('')
+  const statsScopeTeamId = ref('')
+  const securityEvents = ref<SecurityEvent[]>([])
+  const securityStatus = ref<StatsStatus>('idle')
+  const securityError = ref('')
   const lastSyncedAt = ref('')
   let saveTimer: number | undefined
   let syncTimer: number | undefined
@@ -192,14 +227,22 @@ export const useChatStore = defineStore('chat', () => {
     sortByUpdatedAt(conversations.value.filter((conversation) => conversation.isArchived)),
   )
   const activeConversation = computed<Conversation | null>(() => {
+    if (activeTeamConversation.value) return activeTeamConversation.value
     const conversation = findConversation(activeId.value)
     return conversation && !conversation.isArchived ? conversation : null
   })
+  const isViewingTeamConversation = computed(() => Boolean(activeTeamConversation.value))
+  const flattenedTeamConversations = computed(() =>
+    sortByUpdatedAt(Object.values(teamConversations.value).flat()),
+  )
   const isSending = computed(() =>
     activeId.value ? Boolean(sendingByConversation.value[activeId.value]) : false,
   )
   const filteredConversations = computed(() => searchConversations(searchQuery.value))
-  const localStats = computed<ChatStats>(() => buildStats())
+  const selectedStatsTeam = computed(() =>
+    teams.value.find((team) => team.id === statsScopeTeamId.value) || null,
+  )
+  const localStats = computed<ChatStats>(() => buildStats(statsScopeTeamId.value))
   const stats = computed<ChatStats>(() =>
     authStatus.value === 'authenticated' && remoteStats.value ? remoteStats.value : localStats.value,
   )
@@ -217,6 +260,7 @@ export const useChatStore = defineStore('chat', () => {
       conversations.value = normalizeConversations(stored.conversations || [])
       userProfile.value = normalizeProfile(stored.userProfile)
       settings.value = normalizeSettings(stored.settings)
+      statsScopeTeamId.value = stored.statsScopeTeamId || ''
       const storedActiveId = stored.activeId || ''
       activeId.value = conversations.value.some((conversation) => conversation.id === storedActiveId)
         ? storedActiveId
@@ -224,6 +268,7 @@ export const useChatStore = defineStore('chat', () => {
     } catch {
       conversations.value = []
       activeId.value = ''
+      statsScopeTeamId.value = ''
     }
   }
 
@@ -241,6 +286,15 @@ export const useChatStore = defineStore('chat', () => {
     remoteStats.value = null
     statsStatus.value = 'idle'
     statsError.value = ''
+    teams.value = []
+    teamMembers.value = {}
+    teamConversations.value = {}
+    activeTeamConversation.value = null
+    teamStatus.value = 'idle'
+    teamError.value = ''
+    securityEvents.value = []
+    securityStatus.value = 'idle'
+    securityError.value = ''
     isApplyingRemote = true
     loadFromStorage()
     isApplyingRemote = false
@@ -251,6 +305,7 @@ export const useChatStore = defineStore('chat', () => {
     activeId.value = ''
     userProfile.value = { ...DEFAULT_PROFILE }
     settings.value = { ...DEFAULT_SETTINGS }
+    statsScopeTeamId.value = ''
   }
 
   function saveToStorage() {
@@ -263,6 +318,7 @@ export const useChatStore = defineStore('chat', () => {
       userProfile: userProfile.value,
       settings: settings.value,
       ownerUserId: remoteUser.value?.id || null,
+      statsScopeTeamId: statsScopeTeamId.value,
     }
     try {
       window.localStorage.setItem(activeStorageKey, JSON.stringify(payload))
@@ -308,6 +364,7 @@ export const useChatStore = defineStore('chat', () => {
       updatedAt: now,
     }
     conversations.value.unshift(conversation)
+    activeTeamConversation.value = null
     activeId.value = conversation.id
     return conversation.id
   }
@@ -319,6 +376,19 @@ export const useChatStore = defineStore('chat', () => {
   function selectConversation(id: string) {
     const conversation = findConversation(id)
     if (!conversation || conversation.isArchived) return false
+    activeTeamConversation.value = null
+    activeId.value = id
+    return true
+  }
+
+  function selectTeamConversation(id: string) {
+    const conversation = flattenedTeamConversations.value.find((item) => item.id === id)
+    if (!conversation || conversation.isArchived) return false
+    const ownedConversation = findConversation(id)
+    if (ownedConversation && !ownedConversation.isArchived) {
+      return selectConversation(id)
+    }
+    activeTeamConversation.value = conversation
     activeId.value = id
     return true
   }
@@ -330,6 +400,7 @@ export const useChatStore = defineStore('chat', () => {
     conversations.value.splice(index, 1)
     void deleteRemoteConversationIfNeeded(id)
     if (activeId.value === id) {
+      activeTeamConversation.value = null
       activeId.value = visibleConversations.value[0]?.id || ''
     }
     return activeId.value
@@ -342,6 +413,7 @@ export const useChatStore = defineStore('chat', () => {
     conversation.isArchived = true
     conversation.updatedAt = new Date().toISOString()
     if (activeId.value === id) {
+      activeTeamConversation.value = null
       activeId.value = visibleConversations.value[0]?.id || ''
     }
     return activeId.value
@@ -353,6 +425,7 @@ export const useChatStore = defineStore('chat', () => {
     conversation.isArchived = false
     conversation.updatedAt = new Date().toISOString()
     activeId.value = id
+    activeTeamConversation.value = null
     return true
   }
 
@@ -369,6 +442,7 @@ export const useChatStore = defineStore('chat', () => {
   async function submit(question: string, image: File | null, useStream: boolean) {
     const trimmedQuestion = question.trim()
     if (!trimmedQuestion && !image) return
+    if (activeTeamConversation.value) return
     const conversationId = activeConversation.value?.id || createConversation()
     const conversation = findConversation(conversationId)
     if (!conversation || sendingByConversation.value[conversationId]) return
@@ -845,6 +919,7 @@ export const useChatStore = defineStore('chat', () => {
     syncStatus.value = 'syncing'
     syncError.value = ''
     try {
+      await refreshTeams()
       const remoteConversations = await fetchRemoteConversations()
       isApplyingRemote = true
       conversations.value = mergeConversations(scopedLocalConversations, remoteConversations)
@@ -855,6 +930,7 @@ export const useChatStore = defineStore('chat', () => {
       saveToStorage()
       clearLegacyStorage()
       void refreshStats()
+      void refreshSecurityEvents()
       return true
     } catch (exc) {
       syncStatus.value = 'error'
@@ -877,7 +953,275 @@ export const useChatStore = defineStore('chat', () => {
     const ok = await syncWithRemote()
     if (ok) clearGuestStorage()
     void refreshStats()
+    void refreshSecurityEvents()
     return ok
+  }
+
+  function ensureValidStatsScope(force = false) {
+    if (!statsScopeTeamId.value) return
+    if (teams.value.some((team) => team.id === statsScopeTeamId.value)) return
+    if (!force && !teams.value.length) return
+    statsScopeTeamId.value = ''
+    remoteStats.value = null
+  }
+
+  function updateConversationTeamNames(team: Team) {
+    conversations.value.forEach((conversation) => {
+      if (conversation.teamId === team.id) {
+        conversation.teamName = team.name
+      }
+    })
+  }
+
+  async function refreshTeams() {
+    if (authStatus.value !== 'authenticated') {
+      teams.value = []
+      teamMembers.value = {}
+      teamStatus.value = 'idle'
+      teamError.value = ''
+      statsScopeTeamId.value = ''
+      return []
+    }
+
+    teamStatus.value = 'loading'
+    teamError.value = ''
+    try {
+      teams.value = sortTeams(await fetchTeams())
+      ensureValidStatsScope(true)
+      await refreshTeamConversations()
+      teamStatus.value = 'ready'
+      return teams.value
+    } catch (exc) {
+      teamStatus.value = 'error'
+      teamError.value = exc instanceof Error ? exc.message : '团队加载失败'
+      return teams.value
+    }
+  }
+
+  async function refreshSecurityEvents() {
+    if (authStatus.value !== 'authenticated') {
+      securityEvents.value = []
+      securityStatus.value = 'idle'
+      securityError.value = ''
+      return []
+    }
+
+    securityStatus.value = 'loading'
+    securityError.value = ''
+    try {
+      securityEvents.value = await fetchSecurityEvents()
+      securityStatus.value = 'ready'
+      return securityEvents.value
+    } catch (exc) {
+      securityStatus.value = 'error'
+      securityError.value = exc instanceof Error ? exc.message : '安全记录加载失败'
+      return securityEvents.value
+    }
+  }
+
+  async function refreshTeamConversations(teamId?: string) {
+    if (authStatus.value !== 'authenticated') {
+      teamConversations.value = {}
+      activeTeamConversation.value = null
+      return teamConversations.value
+    }
+    const targetTeams = teamId
+      ? teams.value.filter((team) => team.id === teamId)
+      : teams.value
+    const next = { ...teamConversations.value }
+    if (teamId && !targetTeams.length) {
+      delete next[teamId]
+      teamConversations.value = next
+      return teamConversations.value
+    }
+    try {
+      for (const team of targetTeams) {
+        next[team.id] = normalizeTeamConversations(await fetchTeamConversations(team.id))
+      }
+      teamConversations.value = next
+      if (
+        activeTeamConversation.value &&
+        !flattenedTeamConversations.value.some((item) => item.id === activeTeamConversation.value?.id)
+      ) {
+        activeTeamConversation.value = null
+      }
+    } catch (exc) {
+      teamError.value = exc instanceof Error ? exc.message : '团队对话加载失败'
+    }
+    return teamConversations.value
+  }
+
+  function setStatsScopeTeam(teamId: string) {
+    const nextTeamId = teamId && teams.value.some((team) => team.id === teamId) ? teamId : ''
+    if (statsScopeTeamId.value === nextTeamId) return
+    statsScopeTeamId.value = nextTeamId
+    remoteStats.value = null
+    scheduleSave()
+    void refreshStats()
+  }
+
+  async function createTeamSpace(name: string, description = '') {
+    if (authStatus.value !== 'authenticated') return false
+    teamError.value = ''
+    try {
+      const team = await createTeam({ name: name.trim(), description: description.trim() })
+      teams.value = sortTeams(upsertTeam(teams.value, team))
+      statsScopeTeamId.value = team.id
+      void refreshStats()
+      return true
+    } catch (exc) {
+      teamStatus.value = 'error'
+      teamError.value = exc instanceof Error ? exc.message : '团队创建失败'
+      return false
+    }
+  }
+
+  async function updateTeamSpace(teamId: string, updates: { name?: string; description?: string }) {
+    if (authStatus.value !== 'authenticated') return false
+    teamError.value = ''
+    try {
+      const team = await updateTeam(teamId, updates)
+      teams.value = sortTeams(upsertTeam(teams.value, team))
+      updateConversationTeamNames(team)
+      return true
+    } catch (exc) {
+      teamStatus.value = 'error'
+      teamError.value = exc instanceof Error ? exc.message : '团队更新失败'
+      return false
+    }
+  }
+
+  async function deleteTeamSpace(teamId: string) {
+    if (authStatus.value !== 'authenticated') return false
+    teamError.value = ''
+    try {
+      await deleteTeam(teamId)
+      teams.value = teams.value.filter((team) => team.id !== teamId)
+      delete teamMembers.value[teamId]
+      conversations.value.forEach((conversation) => {
+        if (conversation.teamId === teamId) {
+          conversation.teamId = null
+          conversation.teamName = null
+        }
+      })
+      ensureValidStatsScope()
+      void refreshStats()
+      return true
+    } catch (exc) {
+      teamStatus.value = 'error'
+      teamError.value = exc instanceof Error ? exc.message : '团队删除失败'
+      return false
+    }
+  }
+
+  async function loadTeamMembers(teamId: string) {
+    if (authStatus.value !== 'authenticated' || !teamId) return []
+    teamError.value = ''
+    try {
+      const members = await fetchTeamMembers(teamId)
+      teamMembers.value = {
+        ...teamMembers.value,
+        [teamId]: sortTeamMembers(members),
+      }
+      return teamMembers.value[teamId]
+    } catch (exc) {
+      teamStatus.value = 'error'
+      teamError.value = exc instanceof Error ? exc.message : '成员加载失败'
+      return []
+    }
+  }
+
+  async function addMemberToTeam(teamId: string, username: string, role: TeamRole = 'member') {
+    if (authStatus.value !== 'authenticated') return false
+    teamError.value = ''
+    try {
+      const member = await addTeamMember(teamId, { username: username.trim(), role })
+      teamMembers.value = {
+        ...teamMembers.value,
+        [teamId]: sortTeamMembers(upsertTeamMember(teamMembers.value[teamId] || [], member)),
+      }
+      await refreshTeams()
+      return true
+    } catch (exc) {
+      teamStatus.value = 'error'
+      teamError.value = exc instanceof Error ? exc.message : '添加成员失败'
+      return false
+    }
+  }
+
+  async function updateMemberRole(teamId: string, userId: number, role: TeamRole) {
+    if (authStatus.value !== 'authenticated') return false
+    teamError.value = ''
+    try {
+      const member = await updateTeamMemberRole(teamId, userId, role)
+      teamMembers.value = {
+        ...teamMembers.value,
+        [teamId]: sortTeamMembers(upsertTeamMember(teamMembers.value[teamId] || [], member)),
+      }
+      return true
+    } catch (exc) {
+      teamStatus.value = 'error'
+      teamError.value = exc instanceof Error ? exc.message : '角色更新失败'
+      return false
+    }
+  }
+
+  async function removeMemberFromTeam(teamId: string, userId: number) {
+    if (authStatus.value !== 'authenticated') return false
+    teamError.value = ''
+    try {
+      await removeTeamMember(teamId, userId)
+      teamMembers.value = {
+        ...teamMembers.value,
+        [teamId]: (teamMembers.value[teamId] || []).filter((member) => member.id !== userId),
+      }
+      await refreshTeams()
+      return true
+    } catch (exc) {
+      teamStatus.value = 'error'
+      teamError.value = exc instanceof Error ? exc.message : '移除成员失败'
+      return false
+    }
+  }
+
+  async function assignConversationToTeam(conversationId: string, teamId: string) {
+    const conversation = findConversation(conversationId)
+    if (!conversation) return false
+    if (authStatus.value !== 'authenticated') {
+      teamError.value = '请先登录后再分配团队'
+      return false
+    }
+    const team = teamId ? teams.value.find((item) => item.id === teamId) : null
+    if (teamId && !team) {
+      teamError.value = '只能分配到已加入的团队'
+      return false
+    }
+
+    const previousTeamId = conversation.teamId || ''
+    const previousTeamName = conversation.teamName || ''
+    conversation.teamId = team?.id || null
+    conversation.teamName = team?.name || null
+    touchConversation(conversationId)
+    remoteStats.value = null
+
+    try {
+      const remoteConversation = await assignRemoteConversationTeam(conversationId, team?.id || null)
+      const normalized = normalizeConversations([remoteConversation])[0]
+      if (normalized) Object.assign(conversation, normalized)
+      if (previousTeamId) void refreshTeamConversations(previousTeamId)
+      if (team?.id) void refreshTeamConversations(team.id)
+      void refreshStats()
+      return true
+    } catch {
+      const ok = await syncWithRemote()
+      if (!ok) {
+        conversation.teamId = previousTeamId || null
+        conversation.teamName = previousTeamName || null
+        return false
+      }
+      void refreshStats()
+      return true
+    }
   }
 
   async function refreshStats() {
@@ -888,10 +1232,11 @@ export const useChatStore = defineStore('chat', () => {
       return localStats.value
     }
 
+    ensureValidStatsScope()
     statsStatus.value = 'loading'
     statsError.value = ''
     try {
-      const nextStats = await fetchUserStatsSummary(7)
+      const nextStats = await fetchUserStatsSummary(7, statsScopeTeamId.value || undefined)
       remoteStats.value = normalizeStats(nextStats, localStats.value)
       statsStatus.value = 'ready'
       return remoteStats.value
@@ -969,8 +1314,13 @@ export const useChatStore = defineStore('chat', () => {
     return true
   }
 
-  function buildStats(): ChatStats {
-    const activeItems = conversations.value.filter((conversation) => !conversation.isArchived)
+  function buildStats(teamId = ''): ChatStats {
+    const scopedItems = conversations.value.filter((conversation) => {
+      if (authStatus.value !== 'authenticated') return true
+      if (teamId) return conversation.teamId === teamId
+      return !conversation.teamId
+    })
+    const activeItems = scopedItems.filter((conversation) => !conversation.isArchived)
     const sceneMap = new Map<string, number>()
     const hazardMap = new Map<string, number>()
     activeItems.forEach((conversation) => {
@@ -998,7 +1348,7 @@ export const useChatStore = defineStore('chat', () => {
       totalConversations: activeItems.length,
       totalMessages: activeItems.reduce((sum, item) => sum + item.messages.length, 0),
       completedReports,
-      archivedCount: archivedConversations.value.length,
+      archivedCount: scopedItems.filter((conversation) => conversation.isArchived).length,
       completionRate: activeItems.length ? Math.round((completedConversations / activeItems.length) * 100) : 0,
       activeDays: recentSevenDays.filter((item) => item.count > 0).length,
       latestActivity: activeItems[0]?.updatedAt || '',
@@ -1021,14 +1371,18 @@ export const useChatStore = defineStore('chat', () => {
   watch(activeId, scheduleSave)
   watch(userProfile, scheduleSave, { deep: true })
   watch(settings, scheduleSave, { deep: true })
+  watch(statsScopeTeamId, scheduleSave)
 
   return {
     conversations,
     visibleConversations,
     archivedConversations,
+    flattenedTeamConversations,
     filteredConversations,
     activeId,
     activeConversation,
+    activeTeamConversation,
+    isViewingTeamConversation,
     sendingByConversation,
     isSending,
     error,
@@ -1042,6 +1396,16 @@ export const useChatStore = defineStore('chat', () => {
     syncError,
     statsStatus,
     statsError,
+    teams,
+    teamMembers,
+    teamConversations,
+    teamStatus,
+    teamError,
+    statsScopeTeamId,
+    securityEvents,
+    securityStatus,
+    securityError,
+    selectedStatsTeam,
     lastSyncedAt,
     localStats,
     stats,
@@ -1051,6 +1415,7 @@ export const useChatStore = defineStore('chat', () => {
     createConversation,
     newConversation,
     selectConversation,
+    selectTeamConversation,
     deleteConversation,
     archiveConversation,
     restoreConversation,
@@ -1065,6 +1430,18 @@ export const useChatStore = defineStore('chat', () => {
     loginAccount,
     logoutAccount,
     syncWithRemote,
+    refreshTeams,
+    refreshSecurityEvents,
+    refreshTeamConversations,
+    setStatsScopeTeam,
+    createTeamSpace,
+    updateTeamSpace,
+    deleteTeamSpace,
+    loadTeamMembers,
+    addMemberToTeam,
+    updateMemberRole,
+    removeMemberFromTeam,
+    assignConversationToTeam,
     refreshStats,
     exportConversationAsPDF,
     exportAllAsJson,
@@ -1090,9 +1467,25 @@ function normalizeConversations(items: Conversation[]) {
           previewImageUrl: isPersistableImageUrl(item.previewImageUrl) ? item.previewImageUrl : undefined,
           previewAttachmentId: item.previewAttachmentId,
           isTitleManual: Boolean(item.isTitleManual),
+          teamId: item.teamId ? String(item.teamId) : null,
+          teamName: item.teamName || null,
         }
       }),
   )
+}
+
+function normalizeTeamConversations(items: TeamConversation[]): SharedTeamConversation[] {
+  return normalizeConversations(items).map((conversation) => {
+    const raw = items.find((item) => item.id === conversation.id)
+    const ownerName = raw?.owner?.nickname || raw?.owner?.username || ''
+    const teamName = raw?.teamName || conversation.teamName || null
+    return {
+      ...conversation,
+      teamName: teamName && ownerName ? `${teamName} · ${ownerName}` : teamName,
+      owner: raw?.owner,
+      isOwnedByCurrentUser: Boolean(raw?.isOwnedByCurrentUser),
+    }
+  })
 }
 
 function normalizeMessages(items: ChatMessage[]): ChatMessage[] {
@@ -1301,6 +1694,31 @@ function clearGuestStorage() {
 function clearLegacyStorage() {
   if (typeof window === 'undefined') return
   window.localStorage.removeItem(LEGACY_STORAGE_KEY)
+}
+
+function sortTeams(items: Team[]) {
+  return [...items].sort((left, right) => left.name.localeCompare(right.name, 'zh-CN'))
+}
+
+function upsertTeam(items: Team[], team: Team) {
+  const next = new Map(items.map((item) => [item.id, item]))
+  next.set(team.id, team)
+  return [...next.values()]
+}
+
+function sortTeamMembers(items: TeamMember[]) {
+  const rank: Record<TeamRole, number> = { owner: 0, admin: 1, member: 2 }
+  return [...items].sort((left, right) => {
+    const roleDiff = rank[left.role] - rank[right.role]
+    if (roleDiff) return roleDiff
+    return left.username.localeCompare(right.username, 'zh-CN')
+  })
+}
+
+function upsertTeamMember(items: TeamMember[], member: TeamMember) {
+  const next = new Map(items.map((item) => [item.id, item]))
+  next.set(member.id, member)
+  return [...next.values()]
 }
 
 function isPersistableImageUrl(value?: string) {

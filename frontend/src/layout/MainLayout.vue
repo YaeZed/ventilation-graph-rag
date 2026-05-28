@@ -5,6 +5,7 @@
       @toggle="toggleSidebar"
       @create="createConversation"
       @select="selectConversation"
+      @select-team="selectTeamConversation"
       @archive="archiveConversation"
       @delete="deleteConversation"
       @restore="restoreConversation"
@@ -41,6 +42,12 @@ const createConversation = () => {
 
 const selectConversation = (id: string) => {
   if (chat.selectConversation(id)) {
+    router.push(`/chat/${id}`)
+  }
+}
+
+const selectTeamConversation = (id: string) => {
+  if (chat.selectTeamConversation(id)) {
     router.push(`/chat/${id}`)
   }
 }

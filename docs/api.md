@@ -4,7 +4,18 @@
 
 ## 用户与会话同步 API
 
-用户模块使用 Django session。通过 Vite 同源代理访问时，前端请求会携带 cookie；跨域部署时需要额外配置 CSRF/CORS/session cookie。
+用户模块使用 Django session。通过 Vite 同源代理访问时，前端请求会携带 cookie。所有 `POST` / `PATCH` / `DELETE` 用户模块接口都启用 Django CSRF 校验，前端需要先获取 CSRF cookie，再在写请求中发送 `X-CSRFToken`。
+
+### GET `/api/users/auth/csrf/`
+
+设置 CSRF cookie，并返回当前可用 token。前端启动或首次写请求前调用。
+
+```json
+{
+  "ok": true,
+  "csrfToken": "..."
+}
+```
 
 ### POST `/api/users/auth/register/`
 
@@ -13,7 +24,7 @@
 ```json
 {
   "username": "yaezed",
-  "password": "160722",
+  "password": "MineWindEye#2026A",
   "nickname": "安全工程师",
   "avatarText": "安",
   "settings": {
@@ -24,14 +35,18 @@
 }
 ```
 
+注册密码使用 Django 内置 password validators，默认最少 8 位、拒绝常见密码、纯数字密码和与用户名过近的密码。
+
 ### POST `/api/users/auth/login/`
 
 ```json
 {
   "username": "yaezed",
-  "password": "160722"
+  "password": "MineWindEye#2026A"
 }
 ```
+
+登录失败会按 IP + 用户名做服务端限流；默认 5 次失败后锁定 5 分钟并返回 HTTP 429。
 
 ### POST `/api/users/auth/logout/`
 
@@ -45,17 +60,145 @@
 
 更新昵称、头像文字或偏好设置。
 
+### GET `/api/users/security/events/`
+
+返回当前账号最近 20 条安全事件，用于 `/settings` 的账号安全记录。
+
+```json
+{
+  "ok": true,
+  "events": [
+    {
+      "id": 1,
+      "type": "login_success",
+      "username": "yaezed",
+      "ipAddress": "127.0.0.1",
+      "userAgent": "Mozilla/5.0 ...",
+      "metadata": {},
+      "createdAt": "2026-05-28T09:40:00+08:00"
+    }
+  ]
+}
+```
+
+常见 `type`：`register`、`password_rejected`、`login_success`、`login_failure`、`login_throttled`、`logout`。
+
+### GET `/api/users/teams/`
+
+返回当前登录用户加入的团队列表。
+
+```json
+{
+  "ok": true,
+  "teams": [
+    {
+      "id": "1",
+      "name": "通风一队",
+      "description": "日常辨识协作",
+      "role": "owner",
+      "memberCount": 2,
+      "createdAt": "2026-05-28T09:00:00+08:00",
+      "updatedAt": "2026-05-28T09:00:00+08:00"
+    }
+  ]
+}
+```
+
+### POST `/api/users/teams/`
+
+创建团队。创建者自动成为 `owner`。
+
+```json
+{
+  "name": "通风一队",
+  "description": "日常辨识协作"
+}
+```
+
+### PATCH `/api/users/teams/<teamId>/`
+
+更新团队名称或备注。仅 `owner` / `admin` 可操作。
+
+### DELETE `/api/users/teams/<teamId>/`
+
+删除团队。仅 `owner` 可操作；团队删除后，会话的 `team` 外键置空。
+
+### GET `/api/users/teams/<teamId>/members/`
+
+返回团队成员列表。仅团队成员可访问。
+
+### GET `/api/users/teams/<teamId>/conversations/`
+
+返回该团队下所有显式归属团队的未归档会话。仅团队成员可访问。前端用于侧边栏“团队对话”只读浏览，不会把其他成员的会话写入当前用户个人会话列表。
+
+```json
+{
+  "ok": true,
+  "team": {
+    "id": "1",
+    "name": "通风一队",
+    "role": "member"
+  },
+  "conversations": [
+    {
+      "id": "conversation-client-id",
+      "title": "成员B团队会话",
+      "teamId": "1",
+      "teamName": "通风一队",
+      "owner": {
+        "id": 2,
+        "username": "inspector_b",
+        "nickname": "检查员B",
+        "avatarText": "检"
+      },
+      "isOwnedByCurrentUser": false
+    }
+  ]
+}
+```
+
+### POST `/api/users/teams/<teamId>/members/`
+
+按用户名添加成员或更新已有成员角色。仅 `owner` / `admin` 可操作；可选角色为 `admin` 或 `member`。
+
+```json
+{
+  "username": "inspector_a",
+  "role": "member"
+}
+```
+
+### PATCH `/api/users/teams/<teamId>/members/<userId>/`
+
+修改成员角色。仅 `owner` / `admin` 可操作；不能修改 `owner`。
+
+### DELETE `/api/users/teams/<teamId>/members/<userId>/`
+
+移除成员。`owner` / `admin` 可移除成员；普通成员可退出团队；不能移除 `owner`。
+
 ### GET `/api/users/conversations/`
 
 返回当前用户的后端会话快照。
 
 ### POST `/api/users/conversations/sync/`
 
-批量上行前端会话快照，后端按 `(user, conversation.id)` upsert 后返回完整会话列表。
+批量上行前端会话快照，后端按 `(user, conversation.id)` upsert 后返回完整会话列表。P4 起支持可选 `teamId`；只有当前用户已加入的团队才能被写入，否则按个人会话处理。
 
 ### DELETE `/api/users/conversations/<conversationId>/delete/`
 
 删除当前用户指定会话的后端快照。前端删除已登录账号下的会话时会调用该接口，避免下次同步把已删除会话重新拉回。
+
+### PATCH `/api/users/conversations/<conversationId>/team/`
+
+显式修改当前用户某个会话的团队归属。`teamId` 为空时回到个人空间；非空时要求当前用户是该团队成员。
+
+```json
+{
+  "teamId": "1"
+}
+```
+
+当前前端入口在对话三点菜单的“归属团队”子菜单中；`/settings` 不再提供“当前会话归属”控件。
 
 ### POST `/api/users/conversations/<conversationId>/attachments/upload/`
 
@@ -95,9 +238,9 @@
 
 删除当前用户指定附件记录和本地 media 文件。
 
-### GET `/api/users/stats/summary/?days=7`
+### GET `/api/users/stats/summary/?days=7&teamId=1`
 
-返回当前登录用户的后端会话统计汇总。未归档会话参与主统计，归档会话只计入 `archivedCount`。`days` 控制趋势天数，范围会在后端限制到 1-90。
+返回后端会话统计汇总。未传 `teamId` 时统计当前用户个人空间会话；传入 `teamId` 时统计该团队内所有成员显式分配到团队的会话，并要求当前用户是团队成员。未归档会话参与主统计，归档会话只计入 `archivedCount`。`days` 控制趋势天数，范围会在后端限制到 1-90。
 
 响应：
 
@@ -127,9 +270,9 @@
 }
 ```
 
-### GET `/api/users/stats/trends/?days=7`
+### GET `/api/users/stats/trends/?days=7&teamId=1`
 
-返回当前登录用户未归档会话的日期趋势数组：
+返回个人空间或团队空间未归档会话的日期趋势数组：
 
 ```json
 {
@@ -140,9 +283,9 @@
 }
 ```
 
-### GET `/api/users/stats/hazards/`
+### GET `/api/users/stats/hazards/?teamId=1`
 
-返回当前登录用户未归档会话的风险等级分布：
+返回个人空间或团队空间未归档会话的风险等级分布：
 
 ```json
 {

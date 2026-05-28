@@ -1,8 +1,8 @@
 <template>
   <article
+    ref="itemEl"
     class="conversation-item"
     :class="{ active: conversation.id === activeId, sending: isSending }"
-    @mouseleave="closeMenu"
   >
     <button
       v-if="!isEditing"
@@ -41,7 +41,49 @@
         ⋮
       </button>
 
-      <div v-if="isMenuOpen" class="conversation-menu" @click.stop>
+      <div v-if="isMenuOpen" ref="menuEl" class="conversation-menu" @click.stop>
+        <div
+          v-if="canAssignTeam"
+          class="conversation-menu-submenu"
+          @mouseenter="openTeamMenu"
+        >
+          <button ref="teamMenuTriggerEl" type="button" @click="openTeamMenu">
+            <span class="menu-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <path d="M8 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" />
+                <path d="M16 13a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" />
+                <path d="M3.5 20a4.5 4.5 0 0 1 9 0" />
+                <path d="M12.5 20a4.5 4.5 0 0 1 8 0" />
+              </svg>
+            </span>
+            <span>归属团队</span>
+          </button>
+          <Teleport to="body">
+            <div
+              v-if="isTeamMenuOpen"
+              ref="teamSubmenuEl"
+              class="team-submenu"
+              :style="teamSubmenuStyle"
+              @mouseenter="openTeamMenu"
+              @mouseleave="scheduleCloseTeamMenu"
+              @click.stop
+            >
+            <label class="team-option">
+              <input v-model="selectedTeamId" type="radio" value="" />
+              <span>个人空间</span>
+            </label>
+            <label v-for="team in teams" :key="team.id" class="team-option">
+              <input v-model="selectedTeamId" type="radio" :value="team.id" />
+              <span>{{ team.name }}</span>
+            </label>
+            <p v-if="!teams.length" class="team-option-empty">暂无可选团队</p>
+            <div class="team-option-actions">
+              <button type="button" class="team-option-cancel" @click="cancelTeamAssign">取消</button>
+              <button type="button" class="team-option-confirm" @click="confirmTeamAssign">确认</button>
+            </div>
+            </div>
+          </Teleport>
+        </div>
         <button type="button" @click="shareConversation">
           <span class="menu-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24">
@@ -97,13 +139,15 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, ref } from 'vue'
-import type { Conversation } from '@/stores/chat'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import type { Conversation, Team } from '@/stores/chat'
 
 const props = defineProps<{
   conversation: Conversation
   activeId: string
   isSending: boolean
+  teams: Team[]
+  canAssignTeam?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -112,12 +156,33 @@ const emit = defineEmits<{
   archive: [id: string]
   delete: [id: string]
   export: [id: string]
+  assignTeam: [id: string, teamId: string]
 }>()
 
 const isEditing = ref(false)
 const isMenuOpen = ref(false)
+const isTeamMenuOpen = ref(false)
+const selectedTeamId = ref(props.conversation.teamId || '')
 const draftTitle = ref(props.conversation.title)
+const itemEl = ref<HTMLElement | null>(null)
 const inputEl = ref<HTMLInputElement | null>(null)
+const menuEl = ref<HTMLElement | null>(null)
+const teamMenuTriggerEl = ref<HTMLButtonElement | null>(null)
+const teamSubmenuEl = ref<HTMLElement | null>(null)
+const teamSubmenuPosition = ref({ top: 0, left: 0 })
+let teamMenuCloseTimer: number | undefined
+
+const teamSubmenuStyle = computed(() => ({
+  left: `${teamSubmenuPosition.value.left}px`,
+  top: `${teamSubmenuPosition.value.top}px`,
+}))
+
+watch(
+  () => props.conversation.teamId,
+  (teamId) => {
+    selectedTeamId.value = teamId || ''
+  },
+)
 
 const startEditing = async () => {
   if (props.isSending) return
@@ -144,11 +209,82 @@ const cancel = () => {
 }
 
 const toggleMenu = () => {
-  isMenuOpen.value = !isMenuOpen.value
+  if (isMenuOpen.value) {
+    closeMenu()
+    return
+  }
+  isMenuOpen.value = true
+}
+
+const clearTeamMenuCloseTimer = () => {
+  if (teamMenuCloseTimer === undefined) return
+  window.clearTimeout(teamMenuCloseTimer)
+  teamMenuCloseTimer = undefined
+}
+
+const openTeamMenu = () => {
+  clearTeamMenuCloseTimer()
+  updateTeamSubmenuPosition()
+  isTeamMenuOpen.value = true
+  void nextTick(updateTeamSubmenuPosition)
+}
+
+const scheduleCloseTeamMenu = () => {
+  clearTeamMenuCloseTimer()
+  teamMenuCloseTimer = window.setTimeout(() => {
+    isTeamMenuOpen.value = false
+    teamMenuCloseTimer = undefined
+  }, 180)
 }
 
 const closeMenu = () => {
+  clearTeamMenuCloseTimer()
   isMenuOpen.value = false
+  isTeamMenuOpen.value = false
+}
+
+const handlePointerDown = (event: PointerEvent) => {
+  if (!isMenuOpen.value) return
+  const target = event.target
+  if (!(target instanceof Node)) return
+  if (itemEl.value?.contains(target) || teamSubmenuEl.value?.contains(target)) return
+  closeMenu()
+}
+
+const updateTeamSubmenuPosition = () => {
+  const triggerRect = teamMenuTriggerEl.value?.getBoundingClientRect()
+  if (!triggerRect) return
+  const menuRect = menuEl.value?.getBoundingClientRect()
+  const submenuWidth = 190
+  const gap = 0
+  const viewportPadding = 8
+  const preferredLeft = (menuRect?.right || triggerRect.right) + gap
+  const left = Math.min(
+    preferredLeft,
+    Math.max(viewportPadding, window.innerWidth - submenuWidth - viewportPadding),
+  )
+  const top = Math.max(viewportPadding, triggerRect.top)
+  teamSubmenuPosition.value = { left, top }
+}
+
+const cancelTeamAssign = () => {
+  clearTeamMenuCloseTimer()
+  selectedTeamId.value = props.conversation.teamId || ''
+  isTeamMenuOpen.value = false
+}
+
+const confirmTeamAssign = () => {
+  const targetTeam = props.teams.find((team) => team.id === selectedTeamId.value)
+  const nextLabel = targetTeam?.name || '个人空间'
+  if (selectedTeamId.value !== (props.conversation.teamId || '')) {
+    const confirmed = window.confirm(`将“${props.conversation.title}”归属到“${nextLabel}”？`)
+    if (!confirmed) {
+      cancelTeamAssign()
+      return
+    }
+    emit('assignTeam', props.conversation.id, selectedTeamId.value)
+  }
+  closeMenu()
 }
 
 const archive = () => {
@@ -188,4 +324,19 @@ const formatRelativeTime = (value: string) => {
   if (diffHours < 24) return `${diffHours} 小时前`
   return new Date(value).toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' })
 }
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('resize', updateTeamSubmenuPosition)
+  window.addEventListener('scroll', updateTeamSubmenuPosition, true)
+  window.addEventListener('pointerdown', handlePointerDown, true)
+}
+
+onBeforeUnmount(() => {
+  clearTeamMenuCloseTimer()
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('resize', updateTeamSubmenuPosition)
+    window.removeEventListener('scroll', updateTeamSubmenuPosition, true)
+    window.removeEventListener('pointerdown', handlePointerDown, true)
+  }
+})
 </script>

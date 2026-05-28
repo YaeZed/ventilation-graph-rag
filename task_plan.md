@@ -1,42 +1,43 @@
-# Task Plan: User Module P3 Backend Stats Aggregation
+# Task Plan: User Module P4+ Team Conversation Browser
 
 ## Goal
 
-Move logged-in `/stats` data from purely local Pinia aggregation to backend user-scoped aggregation, while keeping guest statistics local-first.
+Turn teams from "statistics grouping" into a usable team workspace: users can assign a conversation to a team from the conversation action menu, and team members can browse/open team-owned conversations from a sidebar "团队对话" section.
 
 ## Constraints
 
-- Keep guest mode local-first; unauthenticated users should not call backend stats APIs.
-- Logged-in stats must be computed only from the authenticated user's `ConversationRecord` rows.
-- Keep UI alignment consistent with the existing Gemini-style sidebar and current chat layout.
-- Avoid new tables/migrations unless aggregation requires persisted rollups; P3 can derive from conversation snapshots.
+- Keep personal conversations private by default. Only conversations with explicit `teamId` are visible to team members.
+- Preserve existing local-first guest behavior; guests should not see team controls.
+- Move conversation team assignment out of `/settings`; the settings page should keep team/member/account management only.
+- Sidebar alignment must match the existing "最近对话" and "已归档" visual system.
+- Do not auto-edit or delete another user's team conversation in this phase; viewing shared team conversations can be read-only.
 - Do not revert unrelated dirty worktree changes.
 
 ## Phases
 
 | Phase | Status | Scope |
 |---|---|---|
-| 1 | complete | Inspect P3 plan, backend user models/views/routes, frontend stats store/view, and user API client |
-| 2 | complete | Add authenticated backend stats aggregation endpoints under `web_backend/users` |
-| 3 | complete | Add frontend stats API client and make `/stats` prefer backend stats for logged-in users |
-| 4 | complete | Update docs/API/status/runbook/plan for P3 |
-| 5 | complete | Run Django and frontend validation |
+| 1 | complete | Inspect sidebar/conversation item/store/API structure for team conversation integration |
+| 2 | complete | Add backend team conversation list endpoint with membership-gated serialization |
+| 3 | complete | Add frontend API/store state for team conversations and selection behavior |
+| 4 | complete | Move team assignment to conversation menu submenu with confirm/cancel flow |
+| 5 | complete | Add sidebar "团队对话" collapsible section and remove settings "当前会话归属" |
+| 6 | complete | Update docs/planning and run backend/frontend validation |
+| 7 | complete | Polish P4+/P5 UI alignment: team submenu hover, settings team panel, account security list, and reusable dropdowns |
 
 ## Decisions
 
-- P3 summary endpoint should return the same shape as frontend `ChatStats` so the stats page stays simple.
-- Keep `/api/users/stats/summary/`, `/trends/`, and `/hazards/` because they were already documented as the P3 direction; `summary` can include all fields needed by the current UI.
-- Risk buckets use stored `hazard_level` when present and fall back to `未分级`; backend should match frontend normalization.
-- Completion means assistant messages with `role === "assistant"` and `status === "done"`.
-- Completion rate means conversations with at least one completed report divided by active conversations; this avoids rates above 100% when one conversation has multiple reports.
-- Visual charts use CSS so the page remains dependency-light and consistent with the existing UI.
-- Backend stats should ignore archived conversations for primary counts, with `archivedCount` reported separately.
+- The sidebar "团队对话" section should show conversations from teams the user joined, grouped as one collapsible section to avoid adding a new route or full team workspace page.
+- Team conversations created by other users should initially be read-only in the chat pane. This prevents accidental edits/deletes and keeps permissions simple.
+- Conversation assignment should remain explicit and reversible: selecting no team returns the conversation to personal space.
+- The menu flow should require confirmation after selecting a team because it changes visibility for other members.
+- Dropdowns in settings and stats should use the shared `SettingsSelect` component so option colors, hover states, and typography stay consistent across pages.
 
 ## Error Log
 
 | Error | Attempt | Resolution |
 |---|---|---|
-| PowerShell renders Chinese as mojibake in shell output | Read Vue/CSS files through shell | Treat shell output as diagnostic only; preserve actual file content through targeted patches |
-| `rg` denied by sandbox | Search docs for stale phrases | Used PowerShell `Select-String` instead |
-| `manage.py shell -c` broke on PowerShell quoting | Backend stats smoke test | Re-ran the same smoke test through Python stdin |
-| Chinese literal assertion mismatch in stdin smoke test | Backend stats smoke test | Used Unicode escape for `高风险` assertion |
+| Team assignment submenu disappeared before the pointer reached it | Hover-only parent row close logic | Teleported submenu to `body`, positioned it to the right of the main menu, and used outside-click closing |
+| `/settings` first open showed incomplete team state until refresh | Team list refresh without immediate member reload | Load selected-team members immediately and after team-list refreshes |
+| Settings page crashed from an immediate watcher | Watcher called `cancelTeamNameEdit` before a const function initializer ran | Converted team-name edit handlers to hoisted function declarations |
+| Native dropdowns showed system-blue or blank hover/selected states | Reused browser `select` in team/stat controls | Introduced `SettingsSelect.vue` and narrowed global page-header button styles |

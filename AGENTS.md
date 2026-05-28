@@ -85,7 +85,12 @@ npm run dev
 - Frontend conversation isolation is intentional: sending state, SSE message updates, input drafts, and pending image previews are keyed by `conversationId`.
 - Frontend user-layer persistence is local-first in `frontend/src/stores/chat.ts`: guests use `ventilation-graph-rag:user-module:v2:guest`, logged-in users use `ventilation-graph-rag:user-module:v2:user:<userId>`, and snapshots sync to `web_backend/users` through Django session APIs. Existing-account login must not inherit guest/other-account conversations; only new registration migrates guest conversations.
 - Frontend image persistence is split by identity: guests keep compressed data URLs in scoped localStorage; logged-in uploads create backend `ConversationAttachment` records and conversation snapshots keep only attachment URL/metadata. Development media files live under `web_backend/media/`; production still needs an object-storage or static-media policy.
-- `/stats` uses layered statistics: guests use local Pinia aggregation, while logged-in users prefer backend account-level aggregation from `ConversationRecord` through `GET /api/users/stats/summary/?days=7`; team-level aggregation and permissions are the next unfinished product layer.
+- Team support is explicit: `Team`/`TeamMembership` provide `owner/admin/member` roles, and `ConversationRecord.team` is nullable. Personal conversations are not auto-shared; only conversations with a `teamId` enter team stats.
+- Team conversation browsing is separate from personal conversation sync. `GET /api/users/teams/<teamId>/conversations/` returns membership-gated team conversations for read-only sidebar browsing; do not merge other users' team conversations into the current user's local `conversations` array.
+- `/stats` uses layered statistics: guests use local Pinia aggregation, logged-in personal scope uses backend `ConversationRecord` aggregation through `GET /api/users/stats/summary/?days=7`, and team scope uses the same endpoint with `teamId`.
+- User-module write APIs are CSRF-protected. Frontend calls `GET /api/users/auth/csrf/` and sends `X-CSRFToken`; login/register rotate the token, so the frontend API wrapper refreshes the cached token from the cookie after responses.
+- P5 account security uses Django password validators, cache-backed login throttling, session cookie settings, and persisted `SecurityEvent` audit records shown in `/settings`.
+- Settings and stats dropdowns use `frontend/src/components/SettingsSelect.vue` instead of native `select`; keep this component's light styling isolated from global page-header button rules.
 
 ## Environment Variables
 
@@ -98,6 +103,8 @@ npm run dev
 - `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_DATABASE`
 - `MILVUS_HOST`, `MILVUS_PORT`, `MILVUS_URI`, `MILVUS_COLLECTION`
 - `DJANGO_SECRET_KEY`, `DJANGO_DEBUG`, `DJANGO_ALLOWED_HOSTS`
+- `DJANGO_CSRF_TRUSTED_ORIGINS`, `DJANGO_SESSION_COOKIE_AGE`, `DJANGO_SESSION_COOKIE_SECURE`, `DJANGO_CSRF_COOKIE_SECURE`
+- `ACCOUNT_LOGIN_FAILURE_LIMIT`, `ACCOUNT_LOGIN_LOCKOUT_SECONDS`, `ACCOUNT_REGISTER_RATE_LIMIT`, `ACCOUNT_REGISTER_WINDOW_SECONDS`
 - `VENTILATION_PIPELINE_FORCE_REBUILD`
 - `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`
 

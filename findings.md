@@ -64,3 +64,38 @@
 ## P3 Neat-Freak Findings
 
 - `AGENTS.md` still described `/stats` as a P2 local-only panel and backend stats as a future P3 item. That was stale after P3 and has been corrected to the layered guest/local and logged-in/backend model.
+
+## P4 Team Layer Findings
+
+- P4 should not auto-share personal history. Team membership and conversation team assignment must be explicit to avoid exposing old records.
+- The smallest useful backend model is `Team`, `TeamMembership`, and nullable `ConversationRecord.team`.
+- Team statistics can reuse the P3 `ChatStats` shape and add a `teamId` query parameter instead of creating a separate chart contract.
+- Current frontend has no separate team page; the lowest-friction UI is team management in `/settings` and a compact personal/team selector in `/stats`.
+- Existing conversation sync already round-trips optional fields, so `teamId` can be added to the `Conversation` payload without changing the core chat send flow.
+
+## P5 Security Findings
+
+- `web_backend/users/views.py` currently marks most mutating account endpoints with `@csrf_exempt`; P5 should restore Django CSRF protection and make the frontend send `X-CSRFToken`.
+- `frontend/src/api/users.ts` already centralizes user-module fetch calls, so CSRF can be added once through shared request helpers instead of touching every store action.
+- Registration currently accepts weak passwords with only a short length check. Django password validators are the direct production baseline.
+- Login currently has no retry limit. A small cache-backed throttle by IP plus username is enough for this app's current scale and avoids new infrastructure.
+- There is no account security audit trail. A simple `SecurityEvent` table can capture login success/failure, registration, logout, and throttling without changing the chat data model.
+- Team P4 permissions cover basic membership checks, but P5 should verify that non-members cannot see team stats and that member management cannot modify the owner.
+- Django rotates the CSRF token during `login()`. Frontend must refresh its cached token after login/register responses; otherwise the next mutating request can fail with 403.
+- Password rejection during registration happens before the account exists, so those `SecurityEvent` rows are stored by username without a user FK. Failed logins for an existing username are linked to that user.
+- Login throttling is cache-backed. It is correct for local/single-process development; multi-instance production needs a shared cache backend.
+
+## P4+ Team Conversation Browser Findings
+
+- Current P4 lets members contribute conversations to team stats, but `GET /api/users/conversations/` only returns the current user's records. Team members cannot open each other's team conversations.
+- The correct backend boundary is a team-scoped list endpoint requiring membership, not widening the personal conversation endpoint.
+- Current `/settings` contains "当前会话归属", but the user wants ownership assignment in each conversation item's action menu; settings should stop mutating the active chat.
+- Sidebar already has a collapsible "已归档" pattern; "团队对话" should reuse that structure for alignment and predictable scanning.
+
+## P4+/P5 UI Polish Findings
+
+- The conversation "归属团队" submenu should be treated as part of the same open layer as the main menu. Teleporting it to `body`, positioning it beside the trigger, and closing only on outside pointer-down avoids both sidebar overflow clipping and hover-gap disappearance.
+- The first `/settings` team panel render needs immediate member loading even when the selected team id does not change after `refreshTeams()`.
+- Account security can keep the API's recent 20 events, but the settings UI should constrain the visible list to about five rows with a scrollbar to preserve card alignment.
+- Team name editing belongs inline beside the selected team title for owner/admin users; after team mutations, refresh teams and members from the backend instead of relying only on optimistic state.
+- Native `select` controls are not reliable for this UI because OS option styling can override colors. Use `SettingsSelect.vue` in settings/team/stat controls and keep global `.page-header` button rules scoped to direct action buttons.

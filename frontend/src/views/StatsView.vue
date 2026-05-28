@@ -3,9 +3,17 @@
     <header class="page-header">
       <div>
         <h1>统计</h1>
-        <p>按当前账号的会话记录汇总辨识数量、完成度、风险等级和近期活跃情况。</p>
+        <p>按当前范围汇总辨识数量、完成度、风险等级和近期活跃情况。</p>
       </div>
       <div class="page-actions">
+        <SettingsSelect
+          v-if="chat.authStatus === 'authenticated'"
+          class="stats-scope-select"
+          :model-value="chat.statsScopeTeamId"
+          aria-label="选择统计范围"
+          :options="statsScopeOptions"
+          @change="chat.setStatsScopeTeam"
+        />
         <span class="stats-source" :class="chat.statsStatus">
           {{ statsSourceText }}
         </span>
@@ -123,11 +131,18 @@
 
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
+import SettingsSelect from '@/components/SettingsSelect.vue'
 import { useChatStore } from '@/stores/chat'
+
+type SettingsSelectOption = {
+  value: string
+  label: string
+}
 
 const chat = useChatStore()
 
-onMounted(() => {
+onMounted(async () => {
+  if (chat.authStatus === 'authenticated') await chat.refreshTeams()
   void chat.refreshStats()
 })
 
@@ -137,6 +152,10 @@ const maxCount = computed(() =>
 const maxHazardCount = computed(() =>
   Math.max(1, ...chat.stats.hazardCounts.map((item) => item.count)),
 )
+const statsScopeOptions = computed<SettingsSelectOption[]>(() => [
+  { value: '', label: '个人空间' },
+  ...chat.teams.map((team) => ({ value: team.id, label: team.name })),
+])
 const latestActivityText = computed(() =>
   chat.stats.latestActivity
     ? `最近更新 ${new Date(chat.stats.latestActivity).toLocaleString('zh-CN')}`
@@ -151,7 +170,9 @@ const statsSourceText = computed(() => {
   if (chat.authStatus !== 'authenticated') return '本地统计'
   if (chat.statsStatus === 'loading') return '后端统计同步中'
   if (chat.statsStatus === 'error') return `使用本地统计：${chat.statsError}`
-  if (chat.statsStatus === 'ready') return '后端统计'
+  if (chat.statsStatus === 'ready') {
+    return chat.selectedStatsTeam ? `团队统计：${chat.selectedStatsTeam.name}` : '个人后端统计'
+  }
   return '后端统计待同步'
 })
 

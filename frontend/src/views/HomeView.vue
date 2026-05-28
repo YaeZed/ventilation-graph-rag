@@ -7,7 +7,7 @@
       </div>
       <div class="header-actions">
         <button
-          v-if="chat.activeConversation"
+          v-if="chat.activeConversation && !chat.isViewingTeamConversation"
           class="report-action"
           type="button"
           title="导出当前对话 PDF"
@@ -102,14 +102,25 @@
 
     <form class="bottom-bar-container" @submit.prevent="submit">
       <div class="input-capsule">
-        <button class="upload-btn" type="button" title="上传图片" @click="openFilePicker">
+        <button
+          class="upload-btn"
+          type="button"
+          title="上传图片"
+          :disabled="chat.isViewingTeamConversation"
+          @click="openFilePicker"
+        >
           <span>+</span>
         </button>
         <div v-if="activeDraft.preview" class="image-pill">
           <img :src="activeDraft.preview" alt="待上传图片" />
           <button type="button" title="移除图片" @click="clearImage">×</button>
         </div>
-        <input v-model="activeDraft.text" type="text" :placeholder="inputPlaceholder" />
+        <input
+          v-model="activeDraft.text"
+          type="text"
+          :disabled="chat.isViewingTeamConversation"
+          :placeholder="inputPlaceholder"
+        />
         <button class="send-btn" type="submit" :disabled="!canSend" title="发送">
           <span>➤</span>
         </button>
@@ -146,15 +157,22 @@ let scrollRestoreTimer = 0
 const draftKey = computed(() => chat.activeId || 'new')
 const activeDraft = computed(() => getDraft(draftKey.value))
 const canSend = computed(
-  () => (activeDraft.value.text.trim().length > 0 || activeDraft.value.file) && !chat.isSending,
+  () =>
+    !chat.isViewingTeamConversation &&
+    (activeDraft.value.text.trim().length > 0 || activeDraft.value.file) &&
+    !chat.isSending,
 )
 const inputPlaceholder = computed(() =>
-  activeDraft.value.file
+  chat.isViewingTeamConversation
+    ? '团队对话为只读浏览，继续辨识请回到自己的对话或新建对话'
+    : activeDraft.value.file
     ? '补充现场描述或检查重点，例如：局部通风机距回风口约 8 米'
     : '输入检查项，或上传图片后补充现场描述',
 )
 const headerDescription = computed(() =>
-  chat.activeConversation
+  chat.isViewingTeamConversation && chat.activeTeamConversation
+    ? `${chat.activeTeamConversation.teamName || '团队'} · ${chat.activeTeamConversation.owner?.nickname || '团队成员'} 的共享辨识记录`
+    : chat.activeConversation
     ? '上传现场图像并补充描述，系统会生成规程依据明确的辨识报告'
     : '先新建或选择一个对话，所有辨识记录会自动保存到本机',
 )
@@ -167,6 +185,7 @@ watch(
       chat.selectConversation(conversationId)
       return
     }
+    if (chat.selectTeamConversation(conversationId)) return
     router.replace('/chat')
   },
   { immediate: true },

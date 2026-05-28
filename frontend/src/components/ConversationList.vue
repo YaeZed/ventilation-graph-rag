@@ -12,11 +12,14 @@
         :conversation="conversation"
         :active-id="chat.activeId"
         :is-sending="Boolean(chat.sendingByConversation[conversation.id])"
+        :teams="chat.teams"
+        :can-assign-team="chat.authStatus === 'authenticated'"
         @select="$emit('select', $event)"
         @rename="chat.renameConversation"
         @archive="$emit('archive', $event)"
         @delete="$emit('delete', $event)"
         @export="handleExport"
+        @assign-team="chat.assignConversationToTeam"
       />
     </div>
 
@@ -24,6 +27,38 @@
       <strong>{{ chat.searchQuery ? '没有匹配结果' : '暂无历史对话' }}</strong>
       <span v-if="chat.searchQuery">换个关键词试试</span>
     </div>
+
+    <section
+      v-if="chat.authStatus === 'authenticated' && chat.flattenedTeamConversations.length"
+      class="archived-section team-conversation-section"
+    >
+      <button
+        class="archived-header"
+        type="button"
+        :aria-expanded="isTeamOpen"
+        @click="isTeamOpen = !isTeamOpen"
+      >
+        <span class="archive-title">
+          <span class="archive-arrow" aria-hidden="true">›</span>
+          <span>团队对话</span>
+        </span>
+        <small>{{ chat.flattenedTeamConversations.length }}</small>
+      </button>
+      <div v-if="isTeamOpen" class="archived-items">
+        <button
+          v-for="conversation in chat.flattenedTeamConversations"
+          :key="`${conversation.teamId}-${conversation.id}`"
+          class="archived-conversation-item team-conversation-item"
+          :class="{ active: conversation.id === chat.activeId && chat.isViewingTeamConversation }"
+          type="button"
+          :title="`${conversation.teamName || '团队'}：${conversation.title}`"
+          @click="$emit('selectTeam', conversation.id)"
+        >
+          <span>{{ conversation.title }}</span>
+          <small>{{ conversation.teamName || conversation.owner?.nickname || '团队对话' }}</small>
+        </button>
+      </div>
+    </section>
 
     <section v-if="chat.archivedConversations.length" class="archived-section">
       <button
@@ -61,9 +96,11 @@ import { useChatStore } from '@/stores/chat'
 
 const chat = useChatStore()
 const isArchiveOpen = ref(false)
+const isTeamOpen = ref(true)
 
 defineEmits<{
   select: [id: string]
+  selectTeam: [id: string]
   archive: [id: string]
   delete: [id: string]
   restore: [id: string]
