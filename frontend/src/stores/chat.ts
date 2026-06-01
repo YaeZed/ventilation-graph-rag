@@ -29,6 +29,7 @@ import {
   type TeamRole,
 } from '@/api/users'
 import { createSafeMarkdownRenderer } from '@/utils/markdown'
+import type { ChatMessageImage, SensorData } from '@/types/multimodal'
 import { defineStore } from 'pinia'
 import { computed, nextTick, ref, watch } from 'vue'
 
@@ -60,6 +61,8 @@ export type ChatMessage = {
   role: MessageRole
   content: string
   imageUrl?: string
+  images?: ChatMessageImage[]
+  sensorData?: SensorData
   sourceFileName?: string
   attachments?: ChatAttachment[]
   createdAt: string
@@ -131,6 +134,8 @@ export type ChatStats = {
 type AppendMessageOptions = {
   id?: string
   imageUrl?: string
+  images?: ChatMessageImage[]
+  sensorData?: SensorData
   status?: ChatMessage['status']
   sourceFileName?: string
   attachments?: ChatAttachment[]
@@ -148,6 +153,12 @@ const STEP_LABELS: Record<string, string> = {
   concept_search_done: '概念完成',
   vision_analyze: '重新分析',
   vision_analyze_done: '分析完成',
+  sensor_compare: '核对数据',
+  sensor_compare_done: '数据完成',
+  multi_image_observe: '观察多图',
+  multi_image_observe_done: '多图观察',
+  multi_image_analyze: '联合分析',
+  multi_image_analyze_done: '分析完成',
   cypher_match: '匹配规程',
   cypher_match_done: '规程完成',
   generating: '生成报告',
@@ -157,6 +168,9 @@ const DONE_STEPS: Record<string, string> = {
   vision_observe_done: 'vision_observe',
   concept_search_done: 'concept_search',
   vision_analyze_done: 'vision_analyze',
+  sensor_compare_done: 'sensor_compare',
+  multi_image_observe_done: 'multi_image_observe',
+  multi_image_analyze_done: 'multi_image_analyze',
   cypher_match_done: 'cypher_match',
 }
 
@@ -312,7 +326,7 @@ export const useChatStore = defineStore('chat', () => {
     if (typeof window === 'undefined') return
     const payload: StoredChatState = {
       conversations: conversations.value.map((conversation) =>
-        sanitizeConversationForStorage(conversation, authStatus.value !== 'authenticated'),
+        sanitizeConversationForStorage(conversation, true),
       ),
       activeId: activeId.value,
       userProfile: userProfile.value,
@@ -439,9 +453,16 @@ export const useChatStore = defineStore('chat', () => {
     return true
   }
 
-  async function submit(question: string, image: File | null, useStream: boolean) {
+  async function submit(
+    question: string,
+    images: File | File[] | null,
+    useStream: boolean,
+    sensorData?: SensorData | null,
+  ) {
     const trimmedQuestion = question.trim()
-    if (!trimmedQuestion && !image) return
+    const imageFiles = normalizeInputImages(images)
+    const cleanSensorData = normalizeSensorData(sensorData)
+    if (!trimmedQuestion && !imageFiles.length && !cleanSensorData) return
     if (activeTeamConversation.value) return
     const conversationId = activeConversation.value?.id || createConversation()
     const conversation = findConversation(conversationId)
@@ -451,37 +472,58 @@ export const useChatStore = defineStore('chat', () => {
     error.value = ''
 
     const messageId = createId()
-    const uploadedAttachment = image ? await uploadAttachmentForMessage(conversationId, image, messageId) : undefined
-    const fallbackImageUrl =
-      image && (!uploadedAttachment || authStatus.value !== 'authenticated')
-        ? await fileToImageDataUrl(image)
-        : undefined
-    const messageImageUrl = uploadedAttachment?.url || fallbackImageUrl
+    const localMessageImages = await buildLocalMessageImages(imageFiles)
+    const messageImageUrl = localMessageImages[0]?.url
     const userMessage = appendMessage(
       conversationId,
       'user',
-      trimmedQuestion || '请判断图片中的通风安全隐患',
+      trimmedQuestion || defaultQuestionForPayload(imageFiles.length, cleanSensorData),
       {
         id: messageId,
         imageUrl: messageImageUrl,
+        images: localMessageImages,
+        sensorData: cleanSensorData || undefined,
         status: 'done',
-        sourceFileName: image?.name,
-        attachments: uploadedAttachment ? [uploadedAttachment] : undefined,
+        sourceFileName: imageFiles.map((image) => image.name).join('、') || undefined,
       },
     )
     if (messageImageUrl && !conversation.previewImageUrl) {
       conversation.previewImageUrl = messageImageUrl
     }
-    if (uploadedAttachment && !conversation.previewAttachmentId) {
-      conversation.previewAttachmentId = uploadedAttachment.id
-    }
     updateAutoTitle(conversation, userMessage.content)
+
+    const uploadedAttachments = await uploadAttachmentsForMessage(
+      conversationId,
+      imageFiles,
+      messageId,
+      localMessageImages,
+    )
+    const persistedAttachments = uploadedAttachments.filter(isChatAttachment)
+    const firstPersistedAttachment = persistedAttachments[0]
+    if (firstPersistedAttachment) {
+      const persistedImages = mergeLocalImagesWithAttachments(localMessageImages, uploadedAttachments)
+      updateMessageMedia(conversationId, messageId, {
+        imageUrl: persistedImages[0]?.url || messageImageUrl,
+        images: persistedImages,
+        attachments: persistedAttachments,
+      })
+      if (
+        persistedImages[0]?.url &&
+        (!conversation.previewImageUrl || isDataUrl(conversation.previewImageUrl))
+      ) {
+        conversation.previewImageUrl = persistedImages[0].url
+      }
+      if (!conversation.previewAttachmentId) {
+        conversation.previewAttachmentId = firstPersistedAttachment.id
+      }
+    }
+
     const assistantMessage = appendMessage(conversationId, 'assistant', '', { status: 'streaming' })
     let hasReceivedToken = false
 
     try {
       if (useStream) {
-        await streamMessage(userMessage.content, image, {
+        await streamMessage(userMessage.content, imageFiles, {
           onStatus(message) {
             const current = findMessage(conversationId, assistantMessage.id)
             if (!current) return
@@ -524,7 +566,7 @@ export const useChatStore = defineStore('chat', () => {
             current.status = 'done'
             updateConversationMeta(conversationId, current)
           },
-        })
+        }, 5, cleanSensorData)
         const current = findMessage(conversationId, assistantMessage.id)
         if (current?.status === 'streaming') {
           markActiveStepsDone(current)
@@ -532,9 +574,9 @@ export const useChatStore = defineStore('chat', () => {
           updateConversationMeta(conversationId, current)
         }
       } else {
-        const answer = image
-          ? await sendImageMessage(userMessage.content, image)
-          : await sendTextMessage(userMessage.content)
+        const answer = imageFiles.length
+          ? await sendImageMessage(userMessage.content, imageFiles, 5, cleanSensorData)
+          : await sendTextMessage(userMessage.content, 5, cleanSensorData)
         updateMessage(conversationId, assistantMessage.id, { content: answer, status: 'done' })
         const current = findMessage(conversationId, assistantMessage.id)
         if (current) updateConversationMeta(conversationId, current)
@@ -560,6 +602,8 @@ export const useChatStore = defineStore('chat', () => {
       role,
       content,
       imageUrl: options.imageUrl,
+      images: options.images,
+      sensorData: options.sensorData,
       sourceFileName: options.sourceFileName,
       attachments: options.attachments,
       createdAt: new Date().toISOString(),
@@ -574,15 +618,84 @@ export const useChatStore = defineStore('chat', () => {
     return conversation.messages[conversation.messages.length - 1]!
   }
 
-  async function uploadAttachmentForMessage(conversationId: string, image: File, messageId: string) {
-    if (authStatus.value !== 'authenticated') return undefined
-    try {
-      return await uploadConversationAttachment(conversationId, image, messageId)
-    } catch (exc) {
-      syncStatus.value = 'error'
-      syncError.value = exc instanceof Error ? exc.message : '图片附件上传失败'
-      return undefined
+  async function uploadAttachmentsForMessage(
+    conversationId: string,
+    images: File[],
+    messageId: string,
+    localImages: ChatMessageImage[] = [],
+  ) {
+    if (authStatus.value !== 'authenticated' || !images.length) return []
+    const attachments: Array<ChatAttachment | undefined> = []
+    for (const [index, image] of images.entries()) {
+      try {
+        attachments.push(await uploadConversationAttachment(conversationId, image, messageId))
+      } catch (exc) {
+        const fallback = dataUrlToImageFile(localImages[index]?.url, image.name)
+        if (fallback) {
+          try {
+            attachments.push(await uploadConversationAttachment(conversationId, fallback, messageId))
+            continue
+          } catch (fallbackExc) {
+            syncStatus.value = 'error'
+            syncError.value =
+              fallbackExc instanceof Error ? fallbackExc.message : '图片附件上传失败'
+          }
+        } else {
+          syncStatus.value = 'error'
+          syncError.value = exc instanceof Error ? exc.message : '图片附件上传失败'
+        }
+        attachments.push(undefined)
+      }
     }
+    return attachments
+  }
+
+  async function buildLocalMessageImages(images: File[]): Promise<ChatMessageImage[]> {
+    const items: ChatMessageImage[] = []
+    for (const [index, image] of images.entries()) {
+      const url = await fileToImageDataUrl(image).catch(() => '')
+      if (!url) continue
+      items.push({
+        id: `${Date.now()}-${index}-${Math.random().toString(16).slice(2)}`,
+        name: image.name || `现场图片 ${index + 1}`,
+        url,
+        size: image.size || 0,
+        mimeType: image.type || 'image/*',
+        createdAt: new Date().toISOString(),
+      })
+    }
+    return items
+  }
+
+  function mergeLocalImagesWithAttachments(
+    localImages: ChatMessageImage[],
+    attachments: Array<ChatAttachment | undefined>,
+  ): ChatMessageImage[] {
+    const merged = localImages.map((image, index) => {
+      const attachment = attachments[index]
+      if (!attachment?.url) return image
+      return {
+        ...image,
+        id: attachment.id,
+        name: attachment.name || image.name,
+        url: attachment.url,
+        size: attachment.size || image.size,
+        mimeType: attachment.mimeType || image.mimeType,
+        createdAt: attachment.createdAt || image.createdAt,
+      }
+    })
+    attachments.slice(localImages.length).forEach((attachment) => {
+      if (!attachment?.url) return
+      merged.push({
+        id: attachment.id,
+        name: attachment.name || '现场图片',
+        url: attachment.url,
+        size: attachment.size || 0,
+        mimeType: attachment.mimeType || 'image/*',
+        createdAt: attachment.createdAt,
+      })
+    })
+    return merged
   }
 
   function findConversation(id: string): Conversation | undefined {
@@ -605,6 +718,19 @@ export const useChatStore = defineStore('chat', () => {
     const message = findMessage(conversationId, id)
     if (!message) return
     Object.assign(message, updates)
+    touchConversation(conversationId)
+  }
+
+  function updateMessageMedia(
+    conversationId: string,
+    id: string,
+    updates: Pick<AppendMessageOptions, 'imageUrl' | 'images' | 'attachments'>,
+  ) {
+    const message = findMessage(conversationId, id)
+    if (!message) return
+    message.imageUrl = updates.imageUrl
+    message.images = updates.images
+    message.attachments = updates.attachments
     touchConversation(conversationId)
   }
 
@@ -769,7 +895,16 @@ export const useChatStore = defineStore('chat', () => {
     const date = updatedAt.toLocaleDateString('zh-CN')
     const isoDate = conversation.updatedAt.slice(0, 10)
     const messageText = conversation.messages
-      .map((message) => `${message.role === 'assistant' ? '报告' : '提问'} ${message.content} ${message.sourceFileName || ''}`)
+      .map((message) => {
+        const sensorText =
+          message.sensorData?.entries
+            .map((entry) => `${entry.label} ${entry.value} ${entry.unit} ${entry.location || ''}`)
+            .join(' ') || ''
+        const imageText = getMessageImages(message)
+          .map((image) => image.name)
+          .join(' ')
+        return `${message.role === 'assistant' ? '报告' : '提问'} ${message.content} ${message.sourceFileName || ''} ${imageText} ${sensorText}`
+      })
       .join(' ')
 
     return [
@@ -1500,6 +1635,8 @@ function normalizeMessages(items: ChatMessage[]): ChatMessage[] {
           ? '上次响应在刷新前中断'
           : String(item.content || ''),
       imageUrl: isPersistableImageUrl(item.imageUrl) ? item.imageUrl : undefined,
+      images: normalizeMessageImages(item.images || []),
+      sensorData: normalizeSensorData(item.sensorData) || undefined,
       sourceFileName: item.sourceFileName,
       attachments: normalizeAttachments(item.attachments || []),
       createdAt: item.createdAt || new Date().toISOString(),
@@ -1513,6 +1650,21 @@ function normalizeMessages(items: ChatMessage[]): ChatMessage[] {
       })),
       currentStatus: item.currentStatus,
     }))
+}
+
+function normalizeMessageImages(items: ChatMessageImage[]): ChatMessageImage[] | undefined {
+  const images = (Array.isArray(items) ? items : [])
+    .filter((item) => item && typeof item.url === 'string')
+    .map((item) => ({
+      id: String(item.id || createImageId()),
+      name: String(item.name || '现场图片'),
+      url: item.url,
+      size: Number(item.size || 0),
+      mimeType: String(item.mimeType || 'image/*'),
+      createdAt: item.createdAt || new Date().toISOString(),
+    }))
+    .filter((item) => isPersistableImageUrl(item.url))
+  return images.length ? images : undefined
 }
 
 function normalizeAttachments(items: ChatAttachment[]): ChatAttachment[] | undefined {
@@ -1561,7 +1713,9 @@ function sanitizeConversationForStorage(conversation: Conversation, includeImage
     messages: conversation.messages.map((message) => ({
       ...message,
       imageUrl: shouldKeepImageUrl(message.imageUrl) ? message.imageUrl : undefined,
+      images: sanitizeMessageImages(message.images || [], includeImages),
       attachments: normalizeAttachments(message.attachments || []),
+      sensorData: normalizeSensorData(message.sensorData) || undefined,
     })),
   }
 }
@@ -1577,10 +1731,37 @@ function mergeConversations(localItems: Conversation[], remoteItems: Conversatio
       !localConversation ||
       toTimestamp(remoteConversation.updatedAt) >= toTimestamp(localConversation.updatedAt)
     ) {
-      merged.set(remoteConversation.id, remoteConversation)
+      merged.set(
+        remoteConversation.id,
+        localConversation ? preserveLocalMessageMedia(localConversation, remoteConversation) : remoteConversation,
+      )
     }
   })
   return sortByUpdatedAt([...merged.values()])
+}
+
+function preserveLocalMessageMedia(localConversation: Conversation, remoteConversation: Conversation) {
+  const localMessages = new Map(localConversation.messages.map((message) => [message.id, message]))
+  return {
+    ...remoteConversation,
+    previewImageUrl: remoteConversation.previewImageUrl || localConversation.previewImageUrl,
+    previewAttachmentId: remoteConversation.previewAttachmentId || localConversation.previewAttachmentId,
+    messages: remoteConversation.messages.map((remoteMessage) => {
+      const localMessage = localMessages.get(remoteMessage.id)
+      if (!localMessage) return remoteMessage
+      const localImages = normalizeMessageImages(localMessage.images || [])
+      const remoteImages = normalizeMessageImages(remoteMessage.images || [])
+      const localAttachments = normalizeAttachments(localMessage.attachments || [])
+      const remoteAttachments = normalizeAttachments(remoteMessage.attachments || [])
+      return {
+        ...remoteMessage,
+        imageUrl: remoteMessage.imageUrl || localMessage.imageUrl,
+        images: remoteImages || localImages,
+        sourceFileName: remoteMessage.sourceFileName || localMessage.sourceFileName,
+        attachments: remoteAttachments || localAttachments,
+      }
+    }),
+  }
 }
 
 function normalizeStats(next: Partial<ChatStats>, fallback: ChatStats): ChatStats {
@@ -1721,12 +1902,85 @@ function upsertTeamMember(items: TeamMember[], member: TeamMember) {
   return [...next.values()]
 }
 
+function normalizeInputImages(images: File | File[] | null): File[] {
+  if (!images) return []
+  return (Array.isArray(images) ? images : [images]).filter((item) => item instanceof File)
+}
+
+function normalizeSensorData(sensorData?: SensorData | null): SensorData | null {
+  const entries = (Array.isArray(sensorData?.entries) ? sensorData.entries : [])
+    .map((entry) => ({
+      type: entry.type || 'custom',
+      label: String(entry.label || '').trim(),
+      value: Number(entry.value),
+      unit: String(entry.unit || '').trim(),
+      location: entry.location ? String(entry.location).trim() : undefined,
+      timestamp: entry.timestamp ? String(entry.timestamp).trim() : undefined,
+      thresholdRef: entry.thresholdRef ? String(entry.thresholdRef).trim() : undefined,
+    }))
+    .filter((entry) => entry.label && Number.isFinite(entry.value))
+  if (!entries.length) return null
+  return {
+    entries,
+    location: String(sensorData?.location || entries[0]?.location || '未标注地点').trim(),
+    source: sensorData?.source === 'csv' ? 'csv' : 'manual',
+    rawCsv: sensorData?.source === 'csv' ? String(sensorData.rawCsv || '') : undefined,
+  }
+}
+
+function sanitizeMessageImages(images: ChatMessageImage[], includeDataUrls: boolean) {
+  const normalized = normalizeMessageImages(images) || []
+  const filtered = normalized.filter((image) => {
+    if (!isDataUrl(image.url)) return true
+    return includeDataUrls
+  })
+  return filtered.length ? filtered : undefined
+}
+
+function isChatAttachment(value: ChatAttachment | undefined): value is ChatAttachment {
+  return Boolean(value?.id && value.url)
+}
+
+function defaultQuestionForPayload(imageCount: number, sensorData: SensorData | null) {
+  if (imageCount > 1 && sensorData) return '请结合多张现场图片和传感器数据判断通风安全隐患'
+  if (imageCount > 1) return '请联合分析多张现场图片中的通风安全隐患'
+  if (imageCount === 1 && sensorData) return '请结合现场图片和传感器数据判断通风安全隐患'
+  if (imageCount === 1) return '请判断图片中的通风安全隐患'
+  return '请结合传感器数据判断通风安全风险'
+}
+
+function createImageId() {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID()
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
 function isPersistableImageUrl(value?: string) {
   return Boolean(value && !value.startsWith('blob:'))
 }
 
 function isDataUrl(value?: string) {
   return Boolean(value?.startsWith('data:'))
+}
+
+function dataUrlToImageFile(dataUrl?: string, sourceName = '现场图片.jpg') {
+  if (!dataUrl?.startsWith('data:')) return null
+  const match = dataUrl.match(/^data:([^;,]+)(;base64)?,(.*)$/)
+  if (!match) return null
+  const mimeType = match[1] || 'image/jpeg'
+  const isBase64 = Boolean(match[2])
+  const payload = match[3] || ''
+  try {
+    const binary = isBase64 ? atob(payload) : decodeURIComponent(payload)
+    const bytes = new Uint8Array(binary.length)
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index)
+    }
+    const extension = mimeType.split('/')[1] || 'jpg'
+    const baseName = sourceName.replace(/\.[^.]+$/, '') || '现场图片'
+    return new File([bytes], `${baseName}-preview.${extension}`, { type: mimeType })
+  } catch {
+    return null
+  }
 }
 
 function buildRecentSevenDays(conversations: Conversation[]) {
@@ -1773,20 +2027,25 @@ function buildPrintableReport(conversation: Conversation) {
         message.role === 'assistant'
           ? renderPrintableMarkdown(content)
           : renderPrintablePlainText(content)
-      const imageUrl = getMessageImageUrl(message)
-      const image = imageUrl
-        ? `<img class="report-image" src="${escapeAttribute(imageUrl)}" alt="现场图片" />`
+      const images = getMessageImages(message)
+      const image = images
+        .map(
+          (item) =>
+            `<img class="report-image" src="${escapeAttribute(item.url)}" alt="${escapeAttribute(item.name)}" />`,
+        )
+        .join('')
+      const imageNames = images.map((item) => item.name).filter(Boolean)
+      const source = imageNames.length
+        ? `<div class="source-file">图片文件：${escapeHtml(imageNames.join('、'))}</div>`
         : ''
-      const imageName = getMessageImageName(message)
-      const source = imageName
-        ? `<div class="source-file">图片文件：${escapeHtml(imageName)}</div>`
-        : ''
+      const sensor = buildPrintableSensorData(message.sensorData)
       return `<section class="message ${message.role}">
         <div class="message-meta">${message.role === 'assistant' ? '辨识报告' : '现场输入'} · ${formatDateTime(
           message.createdAt,
         )}</div>
         ${image}
         ${source}
+        ${sensor}
         <div class="message-content markdown-body">${body}</div>
       </section>`
     })
@@ -1824,6 +2083,9 @@ function buildPrintableReport(conversation: Conversation) {
         .markdown-body tr:nth-child(even) td { background: #fbfdfc; }
         .report-image { display: block; max-width: 520px; max-height: 360px; margin: 8px 0 10px; border-radius: 8px; object-fit: contain; }
         .source-file { margin-bottom: 8px; color: #697873; font-size: 12px; }
+        .sensor-table { width: 100%; margin: 8px 0 12px; border-collapse: collapse; font-size: 12px; }
+        .sensor-table th, .sensor-table td { padding: 6px 8px; border: 1px solid #d7e2dd; text-align: left; }
+        .sensor-table th { background: #eef6f3; }
         @media print { body { padding: 18mm; } .message { border-color: #cfdad5; } }
       </style>
     </head>
@@ -1837,12 +2099,62 @@ function buildPrintableReport(conversation: Conversation) {
   </html>`
 }
 
+function getMessageImages(message: ChatMessage): ChatMessageImage[] {
+  const images = normalizeMessageImages(message.images || []) || []
+  const attachmentImages = (message.attachments || []).map((attachment) => ({
+    id: attachment.id,
+    name: attachment.name,
+    url: attachment.url,
+    size: attachment.size,
+    mimeType: attachment.mimeType,
+    createdAt: attachment.createdAt,
+  }))
+  const legacyImage =
+    !images.length && !attachmentImages.length && message.imageUrl
+      ? [
+          {
+            id: message.id,
+            name: message.sourceFileName || '现场图片',
+            url: message.imageUrl,
+            size: 0,
+            mimeType: 'image/*',
+          },
+        ]
+      : []
+  const seen = new Set<string>()
+  return [...attachmentImages, ...images, ...legacyImage].filter((image) => {
+    if (!image.url || seen.has(image.url)) return false
+    seen.add(image.url)
+    return true
+  })
+}
+
 function getMessageImageUrl(message: ChatMessage) {
-  return message.attachments?.[0]?.url || message.imageUrl || ''
+  return getMessageImages(message)[0]?.url || ''
 }
 
 function getMessageImageName(message: ChatMessage) {
-  return message.attachments?.[0]?.name || message.sourceFileName || ''
+  return getMessageImages(message)[0]?.name || message.sourceFileName || ''
+}
+
+function buildPrintableSensorData(sensorData?: SensorData) {
+  const cleanSensorData = normalizeSensorData(sensorData)
+  if (!cleanSensorData) return ''
+  const rows = cleanSensorData.entries
+    .map(
+      (entry) => `<tr>
+        <td>${escapeHtml(entry.label)}</td>
+        <td>${escapeHtml(String(entry.value))}</td>
+        <td>${escapeHtml(entry.unit)}</td>
+        <td>${escapeHtml(entry.location || cleanSensorData.location)}</td>
+        <td>${escapeHtml(entry.timestamp || '')}</td>
+      </tr>`,
+    )
+    .join('')
+  return `<table class="sensor-table">
+    <thead><tr><th>参数</th><th>数值</th><th>单位</th><th>检测地点</th><th>时间</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`
 }
 
 function escapeHtml(value: string) {

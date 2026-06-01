@@ -40,6 +40,12 @@ class VisionExtractionResult:
     risk_level: str = "需要注意"
 
 
+@dataclass
+class MultiImageResult(VisionExtractionResult):
+    per_image_observations: dict[int, str] = field(default_factory=dict)
+    cross_image_findings: list[str] = field(default_factory=list)
+
+
 class VentilationVisionExtractor:
     """Observe, classify, and extract structured fields from a site image."""
 
@@ -74,6 +80,40 @@ class VentilationVisionExtractor:
             image_url=image_url,
             user_question=user_question,
             observation=observation,
+            concepts=concepts,
+        )
+
+    def extract_multi(self, image_paths: list[str], user_question: str = "") -> MultiImageResult:
+        """Run independent observation for each image, then one joint analysis pass."""
+        if not image_paths:
+            raise ValueError("至少需要 1 张图片")
+        if len(image_paths) == 1:
+            single = self.extract(image_paths[0], user_question=user_question)
+            return MultiImageResult(
+                **single.__dict__,
+                per_image_observations={1: single.raw_observations or single.description},
+                cross_image_findings=[],
+            )
+
+        image_urls = [self._image_to_url(path) for path in image_paths]
+        observations = []
+        for index, image_url in enumerate(image_urls, start=1):
+            observations.append(
+                self.observe(
+                    image_url=image_url,
+                    user_question=(
+                        f"{user_question or '请判断现场通风安全隐患'}\n"
+                        f"这是同一现场的第 {index}/{len(image_urls)} 张照片，请保留可与其他照片交叉验证的线索。"
+                    ),
+                )
+            )
+
+        merged_observation = self._merge_observations(observations)
+        concepts = self.retrieve_concepts(merged_observation)
+        return self.analyze_multi_with_concepts(
+            image_urls=image_urls,
+            user_question=user_question,
+            observations=observations,
             concepts=concepts,
         )
 
@@ -232,6 +272,138 @@ risk_level 只能取："正常"、"需要注意"、"疑似隐患"、"明确隐�
             risk_level=self._normalize_risk_level(str(data.get("risk_level") or "")),
         )
 
+    def analyze_multi_with_concepts(
+        self,
+        image_urls: list[str],
+        user_question: str = "",
+        observations: list[dict[str, Any]] | None = None,
+        concepts: list[Any] | None = None,
+    ) -> MultiImageResult:
+        """Pass 2 for multiple images: reason over all observations and images together."""
+        observations = observations or []
+        concepts = concepts or []
+        scene_options = [
+            {
+                "id": scene.get("id"),
+                "name": scene.get("name"),
+                "keywords": scene.get("keywords", []),
+                "aliases": scene.get("aliases", []),
+                "schema": scene.get("schema", {}),
+            }
+            for scene in self.scene_schemas
+        ]
+        concept_cards = self._format_concepts(concepts)
+        observation_blocks = []
+        for index, observation in enumerate(observations, start=1):
+            observation_blocks.append(
+                "\n".join(
+                    [
+                        f"【图片 {index} 观察】",
+                        f"- 客观观察：{observation.get('raw_observations', '')}",
+                        f"- 待确认概念：{observation.get('uncertain_concepts', [])}",
+                        f"- 初步场景：{observation.get('preliminary_scene', '')}",
+                        f"- 初步担忧：{observation.get('preliminary_concern', '')}",
+                    ]
+                )
+            )
+
+        prompt = f"""你是一位经验丰富的煤矿通风安全图像理解专家，正在联合分析同一现场的多张照片。
+
+你已经完成各图独立观察：
+{chr(10).join(observation_blocks) or "无独立观察记录"}
+
+【概念参考卡片】
+{concept_cards}
+
+【可选场景与字段 schema】
+{json.dumps(scene_options, ensure_ascii=False, indent=2)}
+
+用户补充问题：{user_question or "无"}
+
+请综合所有图片和概念定义，完成：
+1. 判断各图之间可能的空间关系、因果关系或证据互补关系。
+2. 识别单张图难以确认、但多图联合可以加强判断的问题。
+3. 从可选场景中选择最匹配的 scene_id，并按 schema 提取 structured 字段。
+4. 给出综合 key_observations、per_image_observations、cross_image_findings、primary_hazard 和 risk_level。
+
+risk_level 只能取："正常"、"需要注意"、"疑似隐患"、"明确隐患"。
+
+请返回严格 JSON，不要输出 Markdown：
+{{
+  "scene_id": "airflow_speed",
+  "scene_name": "井巷风速合规",
+  "confidence": 0.0,
+  "structured": {{}},
+  "description": "多图综合描述",
+  "key_observations": ["综合观察1", "综合观察2"],
+  "per_image_observations": {{"1": "图片1观察", "2": "图片2观察"}},
+  "cross_image_findings": ["跨图关联发现1"],
+  "primary_hazard": "主要隐患判断",
+  "risk_level": "疑似隐患"
+}}"""
+        raw = self._chat_with_images(image_urls, prompt, temperature=0.25)
+        data = self._parse_json(raw)
+
+        scene_id = self._normalize_scene_id(str(data.get("scene_id") or ""))
+        scene_schema = self._find_scene_schema(scene_id)
+        if not scene_schema:
+            scene_id = self._fallback_scene_id(
+                " ".join(
+                    [
+                        raw,
+                        user_question,
+                        " ".join(str(item.get("raw_observations", "")) for item in observations),
+                        " ".join(str(item.get("preliminary_scene", "")) for item in observations),
+                    ]
+                )
+            )
+            scene_schema = self._find_scene_schema(scene_id or "")
+
+        if not scene_schema:
+            raise ValueError(f"无法识别多图场景: {raw}")
+
+        structured = data.get("structured") or {}
+        if not isinstance(structured, dict):
+            structured = {}
+        cleaned = self._clean_structured_fields(structured, scene_schema.get("schema", {}))
+        description = str(data.get("description") or structured.get("description") or "").strip()
+        if description:
+            cleaned["description"] = description
+        cleaned["scene"] = scene_schema["id"]
+
+        key_observations = self._coerce_string_list(data.get("key_observations"))
+        cross_image_findings = self._coerce_string_list(data.get("cross_image_findings"))
+        per_image_observations = self._coerce_per_image_observations(
+            data.get("per_image_observations"),
+            observations,
+        )
+        uncertain_concepts = self._unique_strings(
+            concept
+            for observation in observations
+            for concept in observation.get("uncertain_concepts", [])
+        )
+
+        return MultiImageResult(
+            scene_id=scene_schema["id"],
+            scene_name=data.get("scene_name") or scene_schema.get("name", scene_schema["id"]),
+            structured_fields=cleaned,
+            description=description,
+            confidence=float(data.get("confidence") or 0.0),
+            raw_classification=json.dumps(observations, ensure_ascii=False),
+            raw_extraction=raw,
+            raw_observations="\n".join(
+                f"图片{index}: {observation.get('raw_observations', '')}"
+                for index, observation in enumerate(observations, start=1)
+            ),
+            uncertain_concepts=uncertain_concepts,
+            concepts_retrieved=[self._concept_to_dict(card) for card in concepts],
+            key_observations=key_observations,
+            primary_hazard=str(data.get("primary_hazard") or ""),
+            risk_level=self._normalize_risk_level(str(data.get("risk_level") or "")),
+            per_image_observations=per_image_observations,
+            cross_image_findings=cross_image_findings,
+        )
+
     def _chat_with_image(self, image_url: str, prompt: str, temperature: float = 0.1) -> str:
         response = self.client.chat.completions.create(
             model=self.model_name,
@@ -244,6 +416,16 @@ risk_level 只能取："正常"、"需要注意"、"疑似隐患"、"明确隐�
                     ],
                 }
             ],
+            temperature=temperature,
+        )
+        return response.choices[0].message.content.strip()
+
+    def _chat_with_images(self, image_urls: list[str], prompt: str, temperature: float = 0.1) -> str:
+        content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        content.extend({"type": "image_url", "image_url": {"url": image_url}} for image_url in image_urls)
+        response = self.client.chat.completions.create(
+            model=self.model_name,
+            messages=[{"role": "user", "content": content}],
             temperature=temperature,
         )
         return response.choices[0].message.content.strip()
@@ -343,6 +525,71 @@ risk_level 只能取："正常"、"需要注意"、"疑似隐患"、"明确隐�
         allowed = {"正常", "需要注意", "疑似隐患", "明确隐患"}
         value = risk_level.strip()
         return value if value in allowed else "需要注意"
+
+    def _merge_observations(self, observations: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "raw_observations": "\n".join(
+                f"图片{index}: {observation.get('raw_observations', '')}"
+                for index, observation in enumerate(observations, start=1)
+            ),
+            "uncertain_concepts": self._unique_strings(
+                concept
+                for observation in observations
+                for concept in observation.get("uncertain_concepts", [])
+            ),
+            "preliminary_scene": "；".join(
+                str(observation.get("preliminary_scene", ""))
+                for observation in observations
+                if observation.get("preliminary_scene")
+            ),
+            "preliminary_concern": "；".join(
+                str(observation.get("preliminary_concern", ""))
+                for observation in observations
+                if observation.get("preliminary_concern")
+            ),
+        }
+
+    def _coerce_string_list(self, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            value = [value]
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    def _coerce_per_image_observations(
+        self,
+        value: Any,
+        fallback_observations: list[dict[str, Any]],
+    ) -> dict[int, str]:
+        if isinstance(value, dict):
+            items = value.items()
+            result = {}
+            for key, text in items:
+                try:
+                    index = int(key)
+                except (TypeError, ValueError):
+                    continue
+                if str(text).strip():
+                    result[index] = str(text).strip()
+            if result:
+                return result
+
+        return {
+            index: str(observation.get("raw_observations", "")).strip()
+            for index, observation in enumerate(fallback_observations, start=1)
+            if str(observation.get("raw_observations", "")).strip()
+        }
+
+    def _unique_strings(self, values) -> list[str]:
+        result = []
+        seen = set()
+        for value in values:
+            text = str(value).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            result.append(text)
+        return result
 
     def _format_concepts(self, concepts: list[Any]) -> str:
         if self.concept_retriever and hasattr(self.concept_retriever, "format_cards"):

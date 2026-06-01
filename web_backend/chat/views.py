@@ -52,6 +52,22 @@ def _load_json_body(request):
         return None
 
 
+def _load_sensor_data(value: Any):
+    if not value:
+        return None
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(value, dict):
+        return None
+    entries = value.get("entries")
+    if not isinstance(entries, list) or not entries:
+        return None
+    return value
+
+
 def _get_pipeline():
     return get_pipeline_service().get_pipeline()
 
@@ -85,8 +101,9 @@ def chat(request):
         return _json_error("缺少 question/message")
 
     top_k = int(payload.get("top_k") or 5)
+    sensor_data = _load_sensor_data(payload.get("sensor_data") or payload.get("sensorData"))
     try:
-        answer = _get_pipeline().query(question, top_k=top_k, stream=False)
+        answer = _get_pipeline().query(question, top_k=top_k, stream=False, sensor_data=sensor_data)
         return JsonResponse({"ok": True, "answer": answer})
     except Exception as exc:
         return _json_error(_friendly_error(exc), status=502)
@@ -96,46 +113,55 @@ def chat(request):
 @require_POST
 def chat_upload(request):
     question = (request.POST.get("question") or request.POST.get("message") or "请判断图片中的通风安全隐患").strip()
-    image = request.FILES.get("image")
-    if not image:
+    images = _uploaded_images(request)
+    if not images:
         return _json_error("缺少 image 文件")
 
     top_k = int(request.POST.get("top_k") or 5)
-    image_path = _save_upload(image)
+    sensor_data = _load_sensor_data(request.POST.get("sensor_data") or request.POST.get("sensorData"))
+    image_paths = [_save_upload(image) for image in images]
     try:
-        answer = _get_pipeline().query(question, top_k=top_k, image_path=str(image_path), stream=False)
+        answer = _get_pipeline().query(
+            question,
+            top_k=top_k,
+            image_paths=[str(path) for path in image_paths],
+            sensor_data=sensor_data,
+            stream=False,
+        )
         return JsonResponse({"ok": True, "answer": answer})
     except Exception as exc:
         return _json_error(_friendly_error(exc), status=502)
     finally:
-        _safe_unlink(image_path)
+        for image_path in image_paths:
+            _safe_unlink(image_path)
 
 
 @csrf_exempt
 @require_POST
 def chat_stream(request):
     question = ""
-    image_path = None
+    image_paths: list[Path] = []
+    sensor_data = None
     top_k = 5
 
     if request.content_type and request.content_type.startswith("multipart/form-data"):
         question = (request.POST.get("question") or request.POST.get("message") or "请判断图片中的通风安全隐患").strip()
         top_k = int(request.POST.get("top_k") or 5)
-        image = request.FILES.get("image")
-        if image:
-            image_path = _save_upload(image)
+        sensor_data = _load_sensor_data(request.POST.get("sensor_data") or request.POST.get("sensorData"))
+        image_paths = [_save_upload(image) for image in _uploaded_images(request)]
     else:
         payload = _load_json_body(request)
         if payload is None:
             return _json_error("请求体必须是 JSON 或 multipart/form-data")
         question = (payload.get("question") or payload.get("message") or "").strip()
         top_k = int(payload.get("top_k") or 5)
+        sensor_data = _load_sensor_data(payload.get("sensor_data") or payload.get("sensorData"))
 
     if not question:
         return _json_error("缺少 question/message")
 
     response = StreamingHttpResponse(
-        _stream_pipeline_events(question, top_k, image_path),
+        _stream_pipeline_events(question, top_k, image_paths, sensor_data),
         content_type="text/event-stream; charset=utf-8",
     )
     response["Cache-Control"] = "no-cache"
@@ -196,25 +222,34 @@ def vision_evaluate(request):
             _safe_unlink(path)
 
 
-def _stream_pipeline_events(question: str, top_k: int, image_path: Path | None):
+def _stream_pipeline_events(
+    question: str,
+    top_k: int,
+    image_paths: list[Path] | None = None,
+    sensor_data: dict[str, Any] | None = None,
+):
     queue: Queue[Any] = Queue()
     finished = object()
     started_at = time.monotonic()
-    image_path_text = str(image_path) if image_path else None
+    image_paths = image_paths or []
+    image_path_texts = [str(path) for path in image_paths]
 
     def run_pipeline():
         try:
             queue.put(("status", {"message": "正在初始化知识库与辨识流水线..."}))
-            if image_path_text:
-                queue.put(("status", {"message": "正在准备图片辨识流程..."}))
+            if image_path_texts:
+                queue.put(("status", {"message": f"正在准备 {len(image_path_texts)} 张图片辨识流程..."}))
+            if sensor_data:
+                queue.put(("status", {"message": "正在接入传感器数据..."}))
 
             chunks = _get_pipeline().query(
                 question,
                 top_k=top_k,
                 stream=True,
-                image_path=image_path_text,
+                image_paths=image_path_texts,
+                sensor_data=sensor_data,
             )
-            if not image_path_text:
+            if not image_path_texts:
                 queue.put(("status", {"message": "正在生成辨识报告..."}))
 
             for chunk in chunks:
@@ -234,12 +269,12 @@ def _stream_pipeline_events(question: str, top_k: int, image_path: Path | None):
 
                 queue.put(("token", {"content": chunk}))
 
-            if not image_path_text:
+            if not image_path_texts:
                 queue.put(("done", {"message": "completed"}))
         except Exception as exc:
             queue.put(("error", {"message": _friendly_error(exc)}))
         finally:
-            if image_path:
+            for image_path in image_paths:
                 _safe_unlink(image_path)
             queue.put(finished)
 
@@ -279,6 +314,15 @@ def _save_upload(uploaded_file) -> Path:
         for chunk in uploaded_file.chunks():
             f.write(chunk)
     return path
+
+
+def _uploaded_images(request) -> list[Any]:
+    images = list(request.FILES.getlist("images"))
+    if not images:
+        image = request.FILES.get("image")
+        if image:
+            images = [image]
+    return images
 
 
 def _safe_unlink(path: Path) -> None:

@@ -1,6 +1,6 @@
 # 当前状态
 
-更新日期：2026-05-28
+更新日期：2026-06-01
 
 ## 已完成
 
@@ -12,16 +12,17 @@
   - 局部通风机与风筒
   - 风门、风墙等通风设施
 - 新增 `VentilationCypherTemplateEngine`。
-- 新增 `VentilationVisionExtractor`，支持 Qwen3.5-Omni 初步观察、概念检索、概念增强图片分析。
+- 新增 `VentilationVisionExtractor`，支持 Qwen3.5-Omni 初步观察、概念检索、概念增强图片分析和多图片联合分析。
 - 新增 `VentilationConceptRetriever`，支持从 Neo4j/Milvus/内置兜底概念中检索通风概念定义卡片。
-- `VentilationRAGPipeline.query()` 支持 `image_path`。
+- `VentilationRAGPipeline.query()` 支持 `image_path`、`image_paths` 和 `sensor_data`。
 - 新增 Django 后端：
   - `POST /api/chat/`
   - `POST /api/chat/upload/`
   - `POST /api/chat/stream/`
 - 新增 Vue3 前端：
   - 对话界面
-  - 图片上传
+  - 图片/多图片上传
+  - 传感器数据手动录入与 CSV 粘贴解析
   - SSE 流式输出
   - Markdown 渲染
   - 会话列表
@@ -33,7 +34,7 @@
   - `/login` 和 `/register` 登录/注册页已接入 Django session 账号。
   - 登录用户会将当前账号作用域内的会话同步到 Django 后端 `ConversationRecord`，并同步昵称和偏好设置。
   - 账号本地缓存已按用户 ID 隔离；已有账号登录只加载该账号本地缓存和后端会话，不再自动继承游客或其他账号的本地会话；注册新账号时才迁移游客会话。
-  - 登录用户图片附件已迁移到后端 `ConversationAttachment`；前端消息保存附件 URL/元数据，刷新和 PDF 导出仍可显示图片。
+  - 登录用户图片附件已迁移到后端 `ConversationAttachment`；前端消息优先使用附件 URL/元数据，浏览器本地缓存可保留压缩预览兜底，刷新和 PDF 导出仍可显示图片。
   - P4 已新增团队空间：`Team`、`TeamMembership`、会话 `team` 归属、团队成员管理、团队统计范围。个人历史不会自动共享，只有显式分配到团队的会话进入团队统计。
   - P4+ 已新增团队会话浏览：对话菜单可显式分配团队；侧边栏“团队对话”可只读打开团队成员共享的会话。
   - P5 已新增生产账号安全基线：CSRF bootstrap、写请求 CSRF 校验、Django password validators、登录失败限流、`SecurityEvent` 审计记录和 `/settings` 账号安全记录。
@@ -41,6 +42,7 @@
   - `/stats` 展示会话统计和 JSON 导出：游客使用本地统计，登录用户优先使用后端 `ConversationRecord` 聚合统计，并可切换个人/团队范围。
 - 前端会话隔离已覆盖发送状态、SSE 回写、输入框草稿和待上传图片预览；一个会话生成中不应阻塞其他会话发起请求。
 - 图片流式辨识已显示 Agent 步骤：初步观察、概念检索、概念增强分析、规程模板匹配、报告生成。
+- `plan-sensor-multiimage` 已完成：前端可在主会话输入区同时添加多张现场图片和传感器数据；消息会保存 `images[]` 与 `sensorData`，PDF 导出包含多图和传感器表格；后端 `POST /api/chat/`、`/upload/`、`/stream/` 支持 `sensor_data`，multipart 支持重复 `images` 字段；RAG pipeline 会执行多图逐张观察、概念合并、联合分析、传感器增强检索和多模态融合报告生成。
 - 新增真实图片识别精度验证功能：
   - `GET /api/chat/vision/scenes/` 返回可标注场景和字段 schema。
   - `POST /api/chat/vision/evaluate/` 批量评估图片识别结果。
@@ -75,17 +77,19 @@
 - 新增 P5 账号安全后，`users.0004` 本地迁移、CSRF/弱密码/登录限流/安全事件/团队权限边界烟测、`web_backend/manage.py check`、`makemigrations --check --dry-run`、`vue-tsc --build` 和 `vite build` 通过。
 - 新增 P4+ 团队会话浏览后，团队会话接口烟测通过：成员 B 归属团队的会话可被成员 A 读取，非成员返回 403；`web_backend/manage.py check`、`makemigrations --check --dry-run`、`vue-tsc --build` 和 `vite build` 通过。
 - 完成 P4+/P5 UI 对齐后，`vue-tsc --build` 和 `vite build` 通过；最近一次验证覆盖 `SettingsSelect` 在 `/settings` 与 `/stats` 的复用，以及全局 `.page-header` 按钮样式收窄。
+- 完成 `plan-sensor-multiimage` 后，Python 编译检查通过，`web_backend/manage.py check` 通过，Django chat 多模态端点 fake pipeline 烟测通过，`node node_modules/vue-tsc/bin/vue-tsc.js --build` 和 `node node_modules/vite/bin/vite.js build` 通过。
 
 ## 剩余风险
 
 - 真实图片识别最终准确率仍取决于 Qwen3.5-Omni 服务、现场样图质量、概念知识覆盖度和用户提供的现场描述质量。
+- 多图片联合分析和传感器交叉验证的最终质量仍取决于图片是否属于同一现场、传感器数值是否标注地点/时间、以及检索结果中是否包含对应规程阈值；生成层会在检索缺失时提示“当前检索结果未包含该参数阈值”。
 - 概念知识层目前已支持脚本化构建/刷新；实际图片准确率仍需确认 Neo4j `Concept` 和 Milvus `ventilation_concepts` 的数据质量。
 - Celery/Redis 目前只是离线任务预留，在线问答链路不依赖 Celery。
 - 生产部署尚未配置 ASGI/WSGI 服务、反向代理、静态资源托管和正式数据库。
 - 本地 `.env` 可能覆盖示例配置；排查时以当前 `.env` 和运行日志中的 Milvus collection 为准。
 - 账号模块已具备 CSRF、密码策略、登录限流和审计记录；仍使用 Django session 和 SQLite，生产部署前应迁移到正式数据库并按实际域名复核 `CSRF_TRUSTED_ORIGINS`、`SameSite`、`Secure`、CORS 和代理头。
 - P4/P4+ 团队权限仍是轻量模型：支持 `owner/admin/member`、成员管理、团队统计、会话显式归属和团队会话只读浏览；尚未支持邀请链接、所有权转移、团队会话编辑审批或复杂组织层级。
-- 游客图片消息仍以压缩 data URL 写入本地会话快照；登录用户已使用后端附件引用。生产部署前仍需把开发期本地 media 存储替换或约束为正式对象存储/静态资源策略。
+- 游客图片消息仍以压缩 data URL 写入本地会话快照；登录用户远端同步使用后端附件引用，但本地账号缓存也可能保留压缩预览作为刷新兜底。生产部署前仍需把开发期本地 media 存储替换或约束为正式对象存储/静态资源策略。
 
 ## P2/P3 统计面板增强
 

@@ -7,7 +7,7 @@ This repo is a coal-mine ventilation safety GraphRAG system. It now includes:
 - Python RAG core under `agent/rag_system/`
 - shared Neo4j/Milvus connection management in `agent/connection_manager.py`
 - deterministic Cypher template retrieval in `agent/rag_system/cypher_templates/`
-- two-pass Qwen3.5-Omni image extraction with concept retrieval in `agent/rag_system/ventilation_vision_extractor.py`
+- two-pass Qwen3.5-Omni image extraction, multi-image joint analysis, and concept retrieval in `agent/rag_system/ventilation_vision_extractor.py`
 - ventilation concept lookup in `agent/rag_system/ventilation_concept_retriever.py`
 - Django API and SSE backend under `web_backend/`
 - Vue 3 + TypeScript + Pinia frontend under `frontend/`
@@ -79,12 +79,13 @@ npm run dev
 - RAG retrieval outputs should remain `langchain_core.documents.Document`.
 - `page_content` can contain Markdown; the frontend renders assistant messages with `markdown-it` and raw HTML disabled.
 - Django initializes `VentilationRAGPipeline` lazily through `web_backend/chat/pipeline_service.py`.
-- SSE endpoint emits plain Server-Sent Events. Text flows use `status`, `token`, `done`, `error`; image flows may also emit `step` events for the frontend agent timeline.
-- Image upload flow is: Django temp file -> `VentilationRAGPipeline.query(image_path=...)` -> Qwen3.5-Omni observation -> concept retrieval -> Qwen3.5-Omni analysis -> Cypher template retrieval -> hybrid fallback -> answer generation.
+- SSE endpoint emits plain Server-Sent Events. Text flows use `status`, `token`, `done`, `error`; image/multi-image/sensor flows may also emit `step` events for the frontend agent timeline.
+- Image upload flow is: Django temp file(s) -> `VentilationRAGPipeline.query(image_path=.../image_paths=..., sensor_data=...)` -> Qwen3.5-Omni observation -> concept retrieval -> Qwen3.5-Omni single-image or multi-image analysis -> Cypher template retrieval -> hybrid fallback -> answer generation.
+- Sensor data flow is: frontend `SensorInputPanel` manual/CSV input -> structured `sensorData` on the user message -> Django `sensor_data` passthrough -> pipeline sensor-enhanced retrieval -> `generate_multimodal_answer(_stream)` cross-validates image evidence, sensor values, and regulation context.
 - Concept knowledge build flow is: create Neo4j `Concept` nodes, then populate Milvus collection `ventilation_concepts`. If `Concept` nodes already exist, `build_concept_knowledge.py` skips LLM generation and refreshes Milvus from Neo4j.
-- Frontend conversation isolation is intentional: sending state, SSE message updates, input drafts, and pending image previews are keyed by `conversationId`.
+- Frontend conversation isolation is intentional: sending state, SSE message updates, input drafts, pending image queues, and pending sensor payloads are keyed by `conversationId`.
 - Frontend user-layer persistence is local-first in `frontend/src/stores/chat.ts`: guests use `ventilation-graph-rag:user-module:v2:guest`, logged-in users use `ventilation-graph-rag:user-module:v2:user:<userId>`, and snapshots sync to `web_backend/users` through Django session APIs. Existing-account login must not inherit guest/other-account conversations; only new registration migrates guest conversations.
-- Frontend image persistence is split by identity: guests keep compressed data URLs in scoped localStorage; logged-in uploads create backend `ConversationAttachment` records and conversation snapshots keep only attachment URL/metadata. Development media files live under `web_backend/media/`; production still needs an object-storage or static-media policy.
+- Frontend image persistence is split by destination: browser localStorage may keep compressed message `images[]` data URLs for refresh resilience, including logged-in scoped caches; remote sync/export strips data URLs and logged-in uploads create backend `ConversationAttachment` records. Multi-image messages store `images[]` for display plus legacy `imageUrl` for compatibility, and attachment upload retries with the compressed preview if the original file is over the backend limit. Development media files live under `web_backend/media/`; production still needs an object-storage or static-media policy.
 - Team support is explicit: `Team`/`TeamMembership` provide `owner/admin/member` roles, and `ConversationRecord.team` is nullable. Personal conversations are not auto-shared; only conversations with a `teamId` enter team stats.
 - Team conversation browsing is separate from personal conversation sync. `GET /api/users/teams/<teamId>/conversations/` returns membership-gated team conversations for read-only sidebar browsing; do not merge other users' team conversations into the current user's local `conversations` array.
 - `/stats` uses layered statistics: guests use local Pinia aggregation, logged-in personal scope uses backend `ConversationRecord` aggregation through `GET /api/users/stats/summary/?days=7`, and team scope uses the same endpoint with `teamId`.

@@ -60,10 +60,25 @@
                 <span class="timestamp">{{ formatTime(message.createdAt) }}</span>
               </div>
 
-              <figure v-if="messageImageUrl(message)" class="image-frame">
-                <img class="message-image" :src="messageImageUrl(message)" alt="上传的现场图片" />
-                <figcaption v-if="imageCaption(message)">{{ imageCaption(message) }}</figcaption>
-              </figure>
+              <div v-if="messageImages(message).length" class="message-image-grid">
+                <figure
+                  v-for="image in messageImages(message)"
+                  :key="image.id"
+                  class="image-frame"
+                >
+                  <button
+                    class="message-image-button"
+                    type="button"
+                    :title="`查看 ${image.name}`"
+                    @click="openImagePreview(image)"
+                  >
+                    <img class="message-image" :src="image.url" :alt="image.name" />
+                  </button>
+                  <figcaption>{{ image.name }}</figcaption>
+                </figure>
+              </div>
+
+              <SensorDataBadge v-if="message.sensorData" :sensor-data="message.sensorData" />
 
               <div v-if="message.role === 'assistant' && message.steps?.length" class="agent-steps">
                 <button class="steps-summary" type="button" @click="toggleSteps(message.id)">
@@ -101,6 +116,29 @@
     </div>
 
     <form class="bottom-bar-container" @submit.prevent="submit">
+      <div
+        v-if="!chat.isViewingTeamConversation && hasDraftContext"
+        class="draft-context-panel"
+      >
+        <MultiImageBar
+          v-if="activeDraft.images.length"
+          :images="activeDraft.images"
+          @add="openFilePicker"
+          @remove="removeDraftImage"
+        />
+        <SensorDataBadge
+          v-if="activeDraft.sensorData && !activeDraft.showSensorPanel"
+          :sensor-data="activeDraft.sensorData"
+          removable
+          @remove="clearSensorData"
+        />
+        <SensorInputPanel
+          v-if="activeDraft.showSensorPanel"
+          :initial-data="activeDraft.sensorData"
+          @apply="applySensorData"
+          @close="activeDraft.showSensorPanel = false"
+        />
+      </div>
       <div class="input-capsule">
         <button
           class="upload-btn"
@@ -111,9 +149,20 @@
         >
           <span>+</span>
         </button>
-        <div v-if="activeDraft.preview" class="image-pill">
-          <img :src="activeDraft.preview" alt="待上传图片" />
-          <button type="button" title="移除图片" @click="clearImage">×</button>
+        <button
+          class="upload-btn sensor-toggle-btn"
+          :class="{ active: activeDraft.sensorData || activeDraft.showSensorPanel }"
+          type="button"
+          title="添加传感器数据"
+          :disabled="chat.isViewingTeamConversation"
+          @click="toggleSensorPanel"
+        >
+          <span>数</span>
+        </button>
+        <div v-if="firstDraftImage" class="image-pill">
+          <img :src="firstDraftImage.preview" alt="待上传图片" />
+          <span>{{ activeDraft.images.length }}</span>
+          <button type="button" title="移除全部图片" @click="clearDraftImages">×</button>
         </div>
         <input
           v-model="activeDraft.text"
@@ -125,22 +174,51 @@
           <span>➤</span>
         </button>
       </div>
-      <input ref="fileInput" hidden type="file" accept="image/*" @change="handleFileChange" />
+      <input ref="fileInput" hidden multiple type="file" accept="image/*" @change="handleFileChange" />
     </form>
+
+    <Teleport to="body">
+      <div
+        v-if="previewImage"
+        class="image-preview-overlay"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="`查看图片：${previewImage.name}`"
+        @click.self="closeImagePreview"
+      >
+        <figure class="image-preview-dialog">
+          <button
+            class="image-preview-close"
+            type="button"
+            title="关闭预览"
+            @click="closeImagePreview"
+          >
+            ×
+          </button>
+          <img :src="previewImage.url" :alt="previewImage.name" />
+          <figcaption>{{ previewImage.name }}</figcaption>
+        </figure>
+      </div>
+    </Teleport>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import EmptyState from '@/components/EmptyState.vue'
 import MarkdownRenderer from '@/components/MarkdownRenderer.vue'
+import MultiImageBar from '@/components/MultiImageBar.vue'
+import SensorDataBadge from '@/components/SensorDataBadge.vue'
+import SensorInputPanel from '@/components/SensorInputPanel.vue'
 import { useChatStore, type AgentStep, type ChatMessage } from '@/stores/chat'
+import type { ChatMessageImage, DraftImage, SensorData } from '@/types/multimodal'
 
 type InputDraft = {
   text: string
-  file: File | null
-  preview: string
+  images: DraftImage[]
+  sensorData: SensorData | null
+  showSensorPanel: boolean
 }
 
 const chat = useChatStore()
@@ -149,6 +227,7 @@ const router = useRouter()
 const drafts = reactive<Record<string, InputDraft>>({})
 const fileInput = ref<HTMLInputElement | null>(null)
 const messagesEl = ref<HTMLElement | null>(null)
+const previewImage = ref<ChatMessageImage | null>(null)
 const collapsedSteps = reactive<Record<string, boolean>>({})
 const scrollPositions = new Map<string, number>()
 const pendingScrollRestoreId = ref('')
@@ -156,17 +235,26 @@ let scrollRestoreTimer = 0
 
 const draftKey = computed(() => chat.activeId || 'new')
 const activeDraft = computed(() => getDraft(draftKey.value))
+const firstDraftImage = computed(() => activeDraft.value.images[0] || null)
+const hasDraftContext = computed(
+  () =>
+    activeDraft.value.images.length > 0 ||
+    Boolean(activeDraft.value.sensorData) ||
+    activeDraft.value.showSensorPanel,
+)
 const canSend = computed(
   () =>
     !chat.isViewingTeamConversation &&
-    (activeDraft.value.text.trim().length > 0 || activeDraft.value.file) &&
+    (activeDraft.value.text.trim().length > 0 ||
+      activeDraft.value.images.length > 0 ||
+      Boolean(activeDraft.value.sensorData)) &&
     !chat.isSending,
 )
 const inputPlaceholder = computed(() =>
   chat.isViewingTeamConversation
     ? '团队对话为只读浏览，继续辨识请回到自己的对话或新建对话'
-    : activeDraft.value.file
-    ? '补充现场描述或检查重点，例如：局部通风机距回风口约 8 米'
+    : activeDraft.value.images.length || activeDraft.value.sensorData
+    ? '补充现场描述，例如：检查掘进工作面整体通风状况'
     : '输入检查项，或上传图片后补充现场描述',
 )
 const headerDescription = computed(() =>
@@ -237,8 +325,9 @@ const getDraft = (conversationId: string) => {
   if (!drafts[conversationId]) {
     drafts[conversationId] = {
       text: '',
-      file: null,
-      preview: '',
+      images: [],
+      sensorData: null,
+      showSensorPanel: false,
     }
   }
   return drafts[conversationId]
@@ -246,21 +335,46 @@ const getDraft = (conversationId: string) => {
 
 const handleFileChange = (event: Event) => {
   const target = event.target as HTMLInputElement
-  const file = target.files?.[0]
-  if (!file) return
+  const files = Array.from(target.files || []).filter((file) => file.type.startsWith('image/'))
+  if (!files.length) return
   const draft = activeDraft.value
-  if (draft.preview) URL.revokeObjectURL(draft.preview)
-  draft.file = file
-  draft.preview = URL.createObjectURL(file)
+  const availableSlots = Math.max(0, MAX_DRAFT_IMAGES - draft.images.length)
+  files.slice(0, availableSlots).forEach((file) => {
+    draft.images.push({
+      id: createDraftImageId(),
+      file,
+      preview: URL.createObjectURL(file),
+    })
+  })
   target.value = ''
 }
 
-const clearImage = () => {
+const removeDraftImage = (id: string) => {
   const draft = activeDraft.value
-  if (draft.preview) URL.revokeObjectURL(draft.preview)
-  draft.file = null
-  draft.preview = ''
+  const image = draft.images.find((item) => item.id === id)
+  if (image) URL.revokeObjectURL(image.preview)
+  draft.images = draft.images.filter((item) => item.id !== id)
   if (fileInput.value) fileInput.value.value = ''
+}
+
+const clearDraftImages = () => {
+  const draft = activeDraft.value
+  draft.images.forEach((image) => URL.revokeObjectURL(image.preview))
+  draft.images = []
+  if (fileInput.value) fileInput.value.value = ''
+}
+
+const toggleSensorPanel = () => {
+  activeDraft.value.showSensorPanel = !activeDraft.value.showSensorPanel
+}
+
+const applySensorData = (sensorData: SensorData) => {
+  activeDraft.value.sensorData = sensorData
+  activeDraft.value.showSensorPanel = false
+}
+
+const clearSensorData = () => {
+  activeDraft.value.sensorData = null
 }
 
 const applyPrompt = (prompt: string) => {
@@ -271,10 +385,13 @@ const submit = async () => {
   if (!canSend.value) return
   const draft = activeDraft.value
   const question = draft.text.trim()
-  const image = draft.file
+  const images = draft.images.map((image) => image.file)
+  const sensorData = draft.sensorData
   draft.text = ''
-  clearImage()
-  await chat.submit(question, image, chat.settings.useStream)
+  draft.sensorData = null
+  draft.showSensorPanel = false
+  clearDraftImages()
+  await chat.submit(question, images, chat.settings.useStream, sensorData)
 }
 
 const exportCurrent = () => {
@@ -282,11 +399,28 @@ const exportCurrent = () => {
   chat.exportConversationAsPDF(chat.activeId)
 }
 
+const openImagePreview = (image: ChatMessageImage) => {
+  previewImage.value = image
+}
+
+const closeImagePreview = () => {
+  previewImage.value = null
+}
+
+const handlePreviewKeydown = (event: KeyboardEvent) => {
+  if (event.key === 'Escape') closeImagePreview()
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', handlePreviewKeydown)
+})
+
 onBeforeUnmount(() => {
   rememberActiveScroll()
   if (scrollRestoreTimer) window.clearTimeout(scrollRestoreTimer)
+  window.removeEventListener('keydown', handlePreviewKeydown)
   Object.values(drafts).forEach((draft) => {
-    if (draft.preview) URL.revokeObjectURL(draft.preview)
+    draft.images.forEach((image) => URL.revokeObjectURL(image.preview))
   })
 })
 
@@ -319,12 +453,34 @@ const stepMeta = (step: AgentStep) => {
   return ''
 }
 
-const messageImageUrl = (message: ChatMessage) =>
-  message.attachments?.[0]?.url || message.imageUrl || ''
-
-const imageCaption = (message: ChatMessage) => {
-  const attachment = message.attachments?.[0]
-  return attachment?.name || message.sourceFileName || ''
+const messageImages = (message: ChatMessage): ChatMessageImage[] => {
+  const attachmentImages =
+    message.attachments?.map((attachment) => ({
+      id: attachment.id,
+      name: attachment.name,
+      url: attachment.url,
+      size: attachment.size,
+      mimeType: attachment.mimeType,
+      createdAt: attachment.createdAt,
+    })) || []
+  const legacyImage =
+    !message.images?.length && !attachmentImages.length && message.imageUrl
+      ? [
+          {
+            id: message.id,
+            name: message.sourceFileName || '现场图片',
+            url: message.imageUrl,
+            size: 0,
+            mimeType: 'image/*',
+          },
+        ]
+      : []
+  const seen = new Set<string>()
+  return [...attachmentImages, ...(message.images || []), ...legacyImage].filter((image) => {
+    if (!image.url || seen.has(image.url)) return false
+    seen.add(image.url)
+    return true
+  })
 }
 
 const hasReportContent = (message: ChatMessage) => {
@@ -376,5 +532,12 @@ const restoreConversationScroll = (conversationId: string) => {
   const savedTop = scrollPositions.get(conversationId)
   const targetTop = savedTop ?? container.scrollHeight
   container.scrollTo({ top: targetTop, behavior: 'auto' })
+}
+
+const MAX_DRAFT_IMAGES = 6
+
+const createDraftImageId = () => {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID()
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 </script>

@@ -184,6 +184,8 @@
 
 批量上行前端会话快照，后端按 `(user, conversation.id)` upsert 后返回完整会话列表。P4 起支持可选 `teamId`；只有当前用户已加入的团队才能被写入，否则按个人会话处理。
 
+前端同步到后端前应剥离消息中的 data URL 图片预览，只上传附件 URL/元数据；浏览器本地缓存可以保留压缩预览作为刷新兜底。
+
 ### DELETE `/api/users/conversations/<conversationId>/delete/`
 
 删除当前用户指定会话的后端快照。前端删除已登录账号下的会话时会调用该接口，避免下次同步把已删除会话重新拉回。
@@ -210,6 +212,8 @@
 |---|---|---|
 | `image` / `file` | 是 | 图片文件，最大 8MB |
 | `messageClientId` | 否 | 前端消息 ID，用于把附件关联到消息 |
+
+后端序列化会话时会按 `messageClientId` 把 `ConversationAttachment` 回填到对应消息的 `attachments`、`images[]` 和兼容字段 `imageUrl`。前端原图上传失败时可用压缩预览重试，避免刷新后只剩文字消息。
 
 响应：
 
@@ -305,9 +309,25 @@
 ```json
 {
   "question": "掘进中的岩巷最低风速要求是多少",
-  "top_k": 3
+  "top_k": 3,
+  "sensor_data": {
+    "location": "掘进工作面",
+    "source": "manual",
+    "entries": [
+      {
+        "type": "wind_speed",
+        "label": "风速",
+        "value": 0.12,
+        "unit": "m/s",
+        "location": "掘进工作面",
+        "timestamp": "08:10"
+      }
+    ]
+  }
 }
 ```
+
+`sensor_data` 可选；提供后，生成 prompt 会增加“传感器实测数据”和“交叉验证分析”，并把参数名称、数值、地点用于规程阈值检索。
 
 响应：
 
@@ -329,30 +349,42 @@
 
 ## POST `/api/chat/upload/`
 
-图片问答，非流式返回。请求类型为 `multipart/form-data`。
+图片问答，非流式返回。请求类型为 `multipart/form-data`。兼容旧的单图字段 `image`，也支持多图字段 `images` 重复提交。
 
 字段：
 
 | 字段 | 必填 | 说明 |
 |---|---|---|
-| `image` | 是 | 现场图片文件 |
+| `image` | 否 | 旧版单张现场图片字段 |
+| `images` | 否 | 多张现场图片，可重复提交；`image` 和 `images` 至少提供一个 |
 | `question` / `message` | 否 | 用户补充问题；默认“请判断图片中的通风安全隐患” |
 | `top_k` | 否 | 检索数量，默认 5 |
+| `sensor_data` / `sensorData` | 否 | JSON 字符串，结构同 `/api/chat/` 的 `sensor_data` |
 
 响应同 `/api/chat/`。
 
 ## POST `/api/chat/stream/`
 
-流式问答。支持 JSON 文字请求和 `multipart/form-data` 图片请求。
+流式问答。支持 JSON 文字/传感器请求和 `multipart/form-data` 图片/多图片请求。
 
 JSON 请求：
 
 ```json
 {
   "question": "矿井有害气体最高允许浓度范围是什么",
-  "top_k": 5
+  "top_k": 5,
+  "sensor_data": {
+    "location": "回风巷",
+    "source": "csv",
+    "entries": [
+      {"type": "methane", "label": "瓦斯浓度", "value": 0.8, "unit": "%"}
+    ],
+    "rawCsv": "时间,瓦斯(%)\n08:10,0.8"
+  }
 }
 ```
+
+multipart 请求字段同 `/api/chat/upload/`，可同时携带 `images` 与 `sensor_data`。
 
 SSE 响应类型：
 
@@ -394,8 +426,11 @@ data: {"step":"vision_observe","message":"正在初步观察图片...","data":{}
 | step | 含义 |
 |---|---|
 | `vision_observe` / `vision_observe_done` | 初步观察图片，提取不确定概念和原始观察 |
+| `multi_image_observe` / `multi_image_observe_done` | 多图逐张观察，合并待确认概念 |
 | `concept_search` / `concept_search_done` | 检索通风概念定义 |
 | `vision_analyze` / `vision_analyze_done` | 结合概念定义复核图片并输出结构化字段 |
+| `multi_image_analyze` / `multi_image_analyze_done` | 结合所有图片和概念卡片做联合分析，输出跨图发现 |
+| `sensor_compare` / `sensor_compare_done` | 接入传感器数据并准备规程阈值比对 |
 | `cypher_match` / `cypher_match_done` | 匹配规程 Cypher 模板和兜底检索 |
 | `generating` | 生成 Markdown 辨识报告 |
 

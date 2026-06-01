@@ -128,25 +128,41 @@
             <form
               v-if="editingTeamId === selectedTeam.id"
               class="team-title-edit-form"
-              @submit.prevent="saveTeamName"
+              @submit.prevent="saveTeamDetails"
             >
               <input
                 ref="teamNameInputEl"
                 v-model="teamNameDraft"
                 type="text"
                 maxlength="40"
-                @blur="saveTeamName"
-                @keydown.esc.prevent="cancelTeamNameEdit"
+                placeholder="团队名称"
+                @keydown.esc.prevent="cancelTeamEdit"
               />
+              <input
+                v-model="teamDescriptionDraft"
+                type="text"
+                maxlength="120"
+                placeholder="备注"
+                @keydown.esc.prevent="cancelTeamEdit"
+              />
+              <button type="submit" class="team-edit-action primary">保存</button>
+              <button type="button" class="team-edit-action" @click="cancelTeamEdit">取消</button>
             </form>
             <div v-else class="team-title-row">
               <strong>{{ selectedTeam.name }}</strong>
+              <small
+                class="team-title-description"
+                :class="{ empty: !selectedTeam.description }"
+                :title="selectedTeam.description || '暂无备注'"
+              >
+                {{ selectedTeam.description || '暂无备注' }}
+              </small>
               <button
                 v-if="canManageSelectedTeam"
                 type="button"
                 class="team-title-edit-button"
-                title="编辑团队名称"
-                @click="startTeamNameEdit"
+                title="编辑团队信息"
+                @click="startTeamEdit"
               >
                 <svg viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M4 20h4.5L19 9.5 14.5 5 4 15.5V20Z" />
@@ -156,14 +172,32 @@
             </div>
             <p>{{ selectedTeam.memberCount }} 名成员</p>
           </div>
-          <button
+          <div
             v-if="selectedTeam.role === 'owner'"
-            type="button"
-            class="ghost-button danger"
-            @click="deleteSelectedTeam"
+            class="team-delete-actions"
+            :class="{ confirming: confirmingDeleteTeamId === selectedTeam.id }"
           >
-            删除团队
-          </button>
+            <button
+              v-if="confirmingDeleteTeamId !== selectedTeam.id"
+              type="button"
+              class="ghost-button danger"
+              @click="requestDeleteSelectedTeam"
+            >
+              删除团队
+            </button>
+            <template v-else>
+              <button
+                type="button"
+                class="ghost-button danger confirm-delete"
+                @click="confirmDeleteSelectedTeam"
+              >
+                确认删除
+              </button>
+              <button type="button" class="ghost-button" @click="cancelDeleteTeam">
+                取消
+              </button>
+            </template>
+          </div>
         </div>
 
         <div class="team-member-list">
@@ -271,6 +305,8 @@ const memberUsername = ref('')
 const memberRole = ref<'admin' | 'member'>('member')
 const editingTeamId = ref('')
 const teamNameDraft = ref('')
+const teamDescriptionDraft = ref('')
+const confirmingDeleteTeamId = ref('')
 const teamNameInputEl = ref<HTMLInputElement | null>(null)
 
 const statusCopy = computed(() => {
@@ -329,32 +365,56 @@ onMounted(() => {
   }
 })
 
-function cancelTeamNameEdit() {
+function cancelTeamEdit() {
   editingTeamId.value = ''
   teamNameDraft.value = ''
+  teamDescriptionDraft.value = ''
 }
 
-async function startTeamNameEdit() {
+async function startTeamEdit() {
   if (!selectedTeam.value || !canManageSelectedTeam.value) return
+  confirmingDeleteTeamId.value = ''
   editingTeamId.value = selectedTeam.value.id
   teamNameDraft.value = selectedTeam.value.name
+  teamDescriptionDraft.value = selectedTeam.value.description || ''
   await nextTick()
   teamNameInputEl.value?.select()
 }
 
-async function saveTeamName() {
+async function saveTeamDetails() {
   if (!selectedTeam.value || editingTeamId.value !== selectedTeam.value.id) return
   const teamId = selectedTeam.value.id
   const nextName = teamNameDraft.value.trim()
-  if (!nextName || nextName === selectedTeam.value.name) {
-    cancelTeamNameEdit()
+  const nextDescription = teamDescriptionDraft.value.trim()
+  if (!nextName) {
+    teamNameInputEl.value?.focus()
     return
   }
-  const ok = await chat.updateTeamSpace(teamId, { name: nextName })
+  if (
+    nextName === selectedTeam.value.name &&
+    nextDescription === (selectedTeam.value.description || '')
+  ) {
+    cancelTeamEdit()
+    return
+  }
+  const ok = await chat.updateTeamSpace(teamId, {
+    name: nextName,
+    description: nextDescription,
+  })
   if (ok) {
-    cancelTeamNameEdit()
+    cancelTeamEdit()
     await refreshTeamSpace(teamId)
   }
+}
+
+function requestDeleteSelectedTeam() {
+  if (!selectedTeam.value || selectedTeam.value.role !== 'owner') return
+  cancelTeamEdit()
+  confirmingDeleteTeamId.value = selectedTeam.value.id
+}
+
+function cancelDeleteTeam() {
+  confirmingDeleteTeamId.value = ''
 }
 
 async function refreshTeamSpace(preferredTeamId = selectedTeamId.value) {
@@ -405,7 +465,8 @@ watch(
 )
 
 watch(selectedTeamId, (teamId) => {
-  cancelTeamNameEdit()
+  cancelTeamEdit()
+  cancelDeleteTeam()
   if (teamId) void chat.loadTeamMembers(teamId)
 }, { immediate: true })
 
@@ -481,10 +542,13 @@ const removeMember = async (userId: number) => {
   if (ok) await refreshTeamSpace(teamId)
 }
 
-const deleteSelectedTeam = async () => {
-  if (!selectedTeamId.value) return
+const confirmDeleteSelectedTeam = async () => {
+  if (!selectedTeamId.value || confirmingDeleteTeamId.value !== selectedTeamId.value) return
   const ok = await chat.deleteTeamSpace(selectedTeamId.value)
-  if (ok) await refreshTeamSpace()
+  if (ok) {
+    cancelDeleteTeam()
+    await refreshTeamSpace()
+  }
 }
 
 const logout = async () => {

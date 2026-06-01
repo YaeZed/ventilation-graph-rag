@@ -191,13 +191,16 @@ def _parse_client_datetime(value: str | None):
     return parsed
 
 
-def _serialize_conversation(record: ConversationRecord, include_owner: bool = False):
+def _serialize_conversation(record: ConversationRecord, include_owner: bool = False, request=None):
     created_at = record.client_created_at or record.created_at
     updated_at = record.client_updated_at or record.updated_at
+    messages = record.messages or []
+    if request is not None:
+        messages = _attach_images_to_messages(record, messages, request)
     payload = {
         "id": record.client_id,
         "title": record.title,
-        "messages": record.messages or [],
+        "messages": messages,
         "createdAt": created_at.isoformat(),
         "updatedAt": updated_at.isoformat(),
         "sceneType": record.scene_type or None,
@@ -219,6 +222,62 @@ def _serialize_conversation(record: ConversationRecord, include_owner: bool = Fa
         }
         payload["isOwnedByCurrentUser"] = False
     return payload
+
+
+def _attach_images_to_messages(record: ConversationRecord, messages: Any, request):
+    if not isinstance(messages, list):
+        return []
+
+    attachments = [_serialize_attachment(attachment, request) for attachment in record.attachments.order_by("created_at")]
+    if not attachments:
+        return messages
+
+    by_message_id: dict[str, list[dict[str, Any]]] = {}
+    for attachment in attachments:
+        message_client_id = attachment.get("messageClientId")
+        if message_client_id:
+            by_message_id.setdefault(str(message_client_id), []).append(attachment)
+
+    next_messages = []
+    for message in messages:
+        if not isinstance(message, dict):
+            next_messages.append(message)
+            continue
+        next_message = {**message}
+        message_attachments = by_message_id.get(str(next_message.get("id") or ""), [])
+        if message_attachments:
+            existing = next_message.get("attachments") if isinstance(next_message.get("attachments"), list) else []
+            next_message["attachments"] = _dedupe_attachments([*existing, *message_attachments])
+            image_items = [
+                {
+                    "id": item["id"],
+                    "name": item["name"],
+                    "url": item["url"],
+                    "size": item["size"],
+                    "mimeType": item["mimeType"],
+                    "createdAt": item["createdAt"],
+                }
+                for item in message_attachments
+                if item.get("url")
+            ]
+            if image_items:
+                next_message["images"] = image_items
+                next_message["imageUrl"] = next_message.get("imageUrl") or image_items[0]["url"]
+                next_message["sourceFileName"] = next_message.get("sourceFileName") or image_items[0]["name"]
+        next_messages.append(next_message)
+    return next_messages
+
+
+def _dedupe_attachments(items: list[dict[str, Any]]):
+    seen: set[str] = set()
+    result = []
+    for item in items:
+        item_id = str(item.get("id") or item.get("url") or "")
+        if not item_id or item_id in seen:
+            continue
+        seen.add(item_id)
+        result.append(item)
+    return result
 
 
 def _serialize_attachment(attachment: ConversationAttachment, request):
@@ -828,7 +887,7 @@ def team_conversations_view(request, team_id: int):
     )
     conversations = []
     for record in records:
-        item = _serialize_conversation(record, include_owner=True)
+        item = _serialize_conversation(record, include_owner=True, request=request)
         item["isOwnedByCurrentUser"] = record.user_id == request.user.id
         conversations.append(item)
     return JsonResponse(
@@ -884,7 +943,7 @@ def conversations_view(request):
 
     records = request.user.conversation_records.select_related("team").order_by("-client_updated_at", "-updated_at")
     return JsonResponse(
-        {"ok": True, "conversations": [_serialize_conversation(record) for record in records]},
+        {"ok": True, "conversations": [_serialize_conversation(record, request=request) for record in records]},
         json_dumps_params={"ensure_ascii": False},
     )
 
@@ -960,7 +1019,7 @@ def sync_conversations_view(request):
 
     records = request.user.conversation_records.select_related("team").order_by("-client_updated_at", "-updated_at")
     return JsonResponse(
-        {"ok": True, "conversations": [_serialize_conversation(record) for record in records]},
+        {"ok": True, "conversations": [_serialize_conversation(record, request=request) for record in records]},
         json_dumps_params={"ensure_ascii": False},
     )
 
@@ -999,7 +1058,7 @@ def conversation_team_view(request, client_id: str):
     record.team = team
     record.save(update_fields=["team", "updated_at"])
     return JsonResponse(
-        {"ok": True, "conversation": _serialize_conversation(record)},
+        {"ok": True, "conversation": _serialize_conversation(record, request=request)},
         json_dumps_params={"ensure_ascii": False},
     )
 

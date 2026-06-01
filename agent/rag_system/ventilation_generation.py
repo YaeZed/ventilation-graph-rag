@@ -147,6 +147,78 @@ class VentilationGenerationModule:
         prompt = self._build_image_prompt(question, documents, vision_result)
         yield from self._stream_prompt(prompt, 0.35, "图片辨识报告生成中断，请稍后重试", max_retries)
 
+    def _build_multimodal_prompt(
+        self,
+        question: str,
+        documents: list[Document],
+        vision_result: Any | None = None,
+        sensor_data: dict[str, Any] | None = None,
+    ) -> str:
+        context = self._format_context(documents)
+        image_block = self._format_vision_block(vision_result)
+        sensor_block = self._format_sensor_block(sensor_data)
+
+        return f"""你是一位经验丰富的矿井通风安全检查员，需要融合现场图片、传感器数据和规程依据生成辨识报告。
+
+【图片分析结果】
+{image_block}
+
+【传感器实测数据】
+{sensor_block}
+
+【参考规程内容】
+{context}
+
+【用户提问】
+{question}
+
+请进行交叉验证分析：
+1. 图片证据与传感器数据是否指向同一通风隐患。
+2. 传感器数值与【参考规程内容】中的阈值、适用地点、条款是否一致。
+3. 如果当前检索内容没有覆盖某项数值阈值，必须明确说明“当前检索结果未包含该参数阈值”，不要编造。
+4. 综合图像、数据和规程给出最终判定，并说明证据强弱。
+
+建议输出 Markdown，包含：
+- **交叉验证分析**：图片观察、跨图关联与传感器数据的对应关系。
+- **数据合规性**：逐项比对传感器数值与规程阈值；阈值必须来自参考内容。
+- **综合结论**：融合图-文-数后的最终判定和风险等级。
+- **规程依据**：引用条款和关键数值。
+- **整改建议**：可执行措施。
+- **补充观察**：无法由当前证据完全确认但值得复核的事项。
+
+回答："""
+
+    def generate_multimodal_answer(
+        self,
+        question: str,
+        documents: list[Document],
+        vision_result: Any | None = None,
+        sensor_data: dict[str, Any] | None = None,
+    ) -> str:
+        prompt = self._build_multimodal_prompt(question, documents, vision_result, sensor_data)
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=self.max_tokens,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as exc:
+            logger.error("多模态报告生成失败: %s", exc)
+            return f"抱歉，系统生成多模态辨识报告时出现故障：{str(exc)}"
+
+    def generate_multimodal_answer_stream(
+        self,
+        question: str,
+        documents: list[Document],
+        vision_result: Any | None = None,
+        sensor_data: dict[str, Any] | None = None,
+        max_retries: int = 3,
+    ) -> Generator[str, None, None]:
+        prompt = self._build_multimodal_prompt(question, documents, vision_result, sensor_data)
+        yield from self._stream_prompt(prompt, 0.3, "多模态辨识报告生成中断，请稍后重试", max_retries)
+
     def _stream_prompt(
         self,
         prompt: str,
@@ -184,6 +256,52 @@ class VentilationGenerationModule:
             level = doc.metadata.get("retrieval_level", "unknown").upper()
             context_parts.append(f"【参考条款：{name} | 检索方式：{level}】\n{content}")
         return "\n\n---\n\n".join(context_parts) or "当前未检索到可引用的规程内容。"
+
+    def _format_vision_block(self, vision_result: Any | None) -> str:
+        if not vision_result:
+            return "未提供图片分析结果。"
+
+        structured_fields = getattr(vision_result, "structured_fields", {}) or {}
+        observations = getattr(vision_result, "key_observations", []) or []
+        observation_text = "\n".join(f"- {item}" for item in observations) or "- 无明确关键观察"
+        per_image = getattr(vision_result, "per_image_observations", {}) or {}
+        per_image_text = ""
+        if per_image:
+            per_image_text = "\n".join(f"- 图片 {key}: {value}" for key, value in per_image.items())
+        cross_findings = getattr(vision_result, "cross_image_findings", []) or []
+        cross_text = "\n".join(f"- {item}" for item in cross_findings) or "- 无明确跨图关联"
+
+        return f"""- 识别场景：{getattr(vision_result, "scene_name", "")}（置信度：{getattr(vision_result, "confidence", 0.0)}）
+- 风险等级：{getattr(vision_result, "risk_level", "需要注意")}
+- 主要隐患判断：{getattr(vision_result, "primary_hazard", "") or "暂无明确结论"}
+- 第一轮观察：{getattr(vision_result, "raw_observations", "") or "无"}
+- 关键观察：
+{observation_text}
+- 每图观察：
+{per_image_text or "- 单图模式或未返回每图观察"}
+- 跨图关联：
+{cross_text}
+- 结构化参数：{json.dumps(structured_fields, ensure_ascii=False)}
+- 参考概念定义：
+{self._format_concept_summary(getattr(vision_result, "concepts_retrieved", []) or [])}"""
+
+    def _format_sensor_block(self, sensor_data: dict[str, Any] | None) -> str:
+        entries = sensor_data.get("entries") if isinstance(sensor_data, dict) else None
+        if not isinstance(entries, list) or not entries:
+            return "未提供传感器数据。"
+
+        lines = ["| 参数 | 数值 | 单位 | 检测地点 | 时间 |", "|---|---:|---|---|---|"]
+        default_location = str(sensor_data.get("location") or "")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            label = entry.get("label") or entry.get("type") or "未知参数"
+            value = entry.get("value", "")
+            unit = entry.get("unit") or ""
+            location = entry.get("location") or default_location or "未标注"
+            timestamp = entry.get("timestamp") or ""
+            lines.append(f"| {label} | {value} | {unit} | {location} | {timestamp} |")
+        return "\n".join(lines)
 
     def _format_concept_summary(self, concepts: list[dict[str, Any]]) -> str:
         if not concepts:

@@ -1,3 +1,5 @@
+import type { SensorData } from '@/types/multimodal'
+
 export type ChatResponse = {
   ok: boolean
   answer?: string
@@ -23,13 +25,17 @@ const REQUEST_TIMEOUT_MS = 120_000
 const IMAGE_REQUEST_TIMEOUT_MS = 600_000
 const STREAM_TIMEOUT_MS = 1_800_000
 
-export async function sendTextMessage(question: string, topK = 5): Promise<string> {
+export async function sendTextMessage(
+  question: string,
+  topK = 5,
+  sensorData?: SensorData | null,
+): Promise<string> {
   const controller = createTimeoutController(REQUEST_TIMEOUT_MS)
   try {
     const response = await fetch(`${API_BASE}/api/chat/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question, top_k: topK }),
+      body: JSON.stringify({ question, top_k: topK, sensor_data: sensorData || undefined }),
       signal: controller.signal,
     })
     return parseAnswer(response)
@@ -40,12 +46,22 @@ export async function sendTextMessage(question: string, topK = 5): Promise<strin
   }
 }
 
-export async function sendImageMessage(question: string, image: File, topK = 5): Promise<string> {
+export async function sendImageMessage(
+  question: string,
+  images: File | File[],
+  topK = 5,
+  sensorData?: SensorData | null,
+): Promise<string> {
   const controller = createTimeoutController(IMAGE_REQUEST_TIMEOUT_MS)
   const formData = new FormData()
+  const imageFiles = normalizeImages(images)
   formData.append('question', question)
   formData.append('top_k', String(topK))
-  formData.append('image', image)
+  if (sensorData) formData.append('sensor_data', JSON.stringify(sensorData))
+  imageFiles.forEach((image) => {
+    formData.append('images', image)
+  })
+  if (imageFiles[0]) formData.append('image', imageFiles[0])
 
   try {
     const response = await fetch(`${API_BASE}/api/chat/upload/`, {
@@ -63,22 +79,28 @@ export async function sendImageMessage(question: string, image: File, topK = 5):
 
 export async function streamMessage(
   question: string,
-  image: File | null,
+  images: File | File[] | null,
   handlers: StreamHandlers,
   topK = 5,
+  sensorData?: SensorData | null,
 ): Promise<void> {
   const controller = createTimeoutController(STREAM_TIMEOUT_MS)
   const init: RequestInit = { method: 'POST', signal: controller.signal }
+  const imageFiles = normalizeImages(images)
 
-  if (image) {
+  if (imageFiles.length) {
     const formData = new FormData()
     formData.append('question', question)
     formData.append('top_k', String(topK))
-    formData.append('image', image)
+    if (sensorData) formData.append('sensor_data', JSON.stringify(sensorData))
+    imageFiles.forEach((image) => {
+      formData.append('images', image)
+    })
+    if (imageFiles[0]) formData.append('image', imageFiles[0])
     init.body = formData
   } else {
     init.headers = { 'Content-Type': 'application/json' }
-    init.body = JSON.stringify({ question, top_k: topK })
+    init.body = JSON.stringify({ question, top_k: topK, sensor_data: sensorData || undefined })
   }
 
   try {
@@ -110,6 +132,11 @@ export async function streamMessage(
   } finally {
     controller.clear()
   }
+}
+
+function normalizeImages(images: File | File[] | null): File[] {
+  if (!images) return []
+  return Array.isArray(images) ? images.filter(Boolean) : [images]
 }
 
 async function parseAnswer(response: Response): Promise<string> {

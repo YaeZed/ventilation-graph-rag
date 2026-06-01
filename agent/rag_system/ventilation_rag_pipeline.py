@@ -179,23 +179,63 @@ class VentilationRAGPipeline:
         logger.info("所有模块初始化完成")
         logger.info("=" * 60)
 
-    def query(self, question: str, top_k: int = 5, stream: bool = False, image_path: str | None = None):
+    def query(
+        self,
+        question: str,
+        top_k: int = 5,
+        stream: bool = False,
+        image_path: str | None = None,
+        image_paths: list[str] | None = None,
+        sensor_data: dict[str, Any] | None = None,
+    ):
         if not self.router:
             raise RuntimeError("请先调用 initialize() 初始化流水线")
 
         logger.info("\n%s\n问题: %s\n%s", "-" * 60, question, "-" * 60)
 
-        if image_path:
-            if stream:
-                return self.query_image_events(question=question, image_path=image_path, top_k=top_k)
-            return self._query_with_image(question=question, image_path=image_path, top_k=top_k, stream=False)
+        normalized_image_paths = self._normalize_image_paths(image_path, image_paths)
+        sensor_data = self._normalize_sensor_data(sensor_data)
 
-        docs, analysis = self.router.route_query(question, top_k=top_k)
+        if len(normalized_image_paths) > 1:
+            if stream:
+                return self.query_multi_image_events(
+                    question=question,
+                    image_paths=normalized_image_paths,
+                    top_k=top_k,
+                    sensor_data=sensor_data,
+                )
+            return self._query_with_multi_image(
+                question=question,
+                image_paths=normalized_image_paths,
+                top_k=top_k,
+                sensor_data=sensor_data,
+            )
+
+        if len(normalized_image_paths) == 1:
+            if stream:
+                return self.query_image_events(
+                    question=question,
+                    image_path=normalized_image_paths[0],
+                    top_k=top_k,
+                    sensor_data=sensor_data,
+                )
+            return self._query_with_image(
+                question=question,
+                image_path=normalized_image_paths[0],
+                top_k=top_k,
+                stream=False,
+                sensor_data=sensor_data,
+            )
+
+        retrieval_question = (
+            self._build_sensor_retrieval_question(question, sensor_data) if sensor_data else question
+        )
+        docs, analysis = self.router.route_query(retrieval_question, top_k=top_k)
         strategy = analysis.recommended_strategy.value
 
         if len(docs) < 2 and strategy == "graph_rag":
             logger.info("  GraphRAG 仅返回 %s 个文档，降级到混合检索", len(docs))
-            hybrid_docs = self.hybrid_ret.hybrid_search(question, top_k=top_k)
+            hybrid_docs = self.hybrid_ret.hybrid_search(retrieval_question, top_k=top_k)
             if hybrid_docs:
                 docs = hybrid_docs
                 strategy = "hybrid_fallback"
@@ -206,11 +246,30 @@ class VentilationRAGPipeline:
         route_stats = self.router.get_route_statistics()
         logger.info("  检索到 %s 个相关文档 | 策略: %s | 路由统计: %s", len(docs), strategy, route_stats)
 
-        if stream:
-            return self.generator.generate_adaptive_answer_stream(question, docs)
-        return self.generator.generate_adaptive_answer(question, docs)
+        if sensor_data:
+            if stream:
+                return self.generator.generate_multimodal_answer_stream(
+                    retrieval_question,
+                    docs,
+                    sensor_data=sensor_data,
+                )
+            return self.generator.generate_multimodal_answer(
+                retrieval_question,
+                docs,
+                sensor_data=sensor_data,
+            )
 
-    def query_image_events(self, question: str, image_path: str, top_k: int = 5):
+        if stream:
+            return self.generator.generate_adaptive_answer_stream(retrieval_question, docs)
+        return self.generator.generate_adaptive_answer(retrieval_question, docs)
+
+    def query_image_events(
+        self,
+        question: str,
+        image_path: str,
+        top_k: int = 5,
+        sensor_data: dict[str, Any] | None = None,
+    ):
         """Yield step/token/done dictionaries for SSE image analysis."""
         if not self.vision_extractor or not self.template_engine:
             raise RuntimeError("视觉提取或 Cypher 模板引擎尚未初始化")
@@ -262,7 +321,12 @@ class VentilationRAGPipeline:
         }
 
         yield {"type": "step", "step": "cypher_match", "message": "正在匹配规程模板..."}
-        retrieval_question, docs, match = self._retrieve_docs_for_image(question, vision_result, top_k)
+        retrieval_question, docs, match = self._retrieve_docs_for_image(
+            question,
+            vision_result,
+            top_k,
+            sensor_data=sensor_data,
+        )
         yield {
             "type": "step",
             "step": "cypher_match_done",
@@ -273,25 +337,217 @@ class VentilationRAGPipeline:
             },
         }
 
+        if sensor_data:
+            entries = sensor_data.get("entries") or []
+            yield {"type": "step", "step": "sensor_compare", "message": "正在核对传感器数据与规程阈值..."}
+            yield {
+                "type": "step",
+                "step": "sensor_compare_done",
+                "message": f"已接入 {len(entries)} 条传感器数据",
+                "data": {
+                    "sensor_count": len(entries),
+                    "sensor_labels": [entry.get("label") for entry in entries if isinstance(entry, dict)],
+                },
+            }
+
         yield {"type": "step", "step": "generating", "message": "正在生成辨识报告..."}
-        for chunk in self.generator.generate_image_answer_stream(retrieval_question, docs, vision_result):
+        if sensor_data:
+            chunks = self.generator.generate_multimodal_answer_stream(
+                retrieval_question,
+                docs,
+                vision_result=vision_result,
+                sensor_data=sensor_data,
+            )
+        else:
+            chunks = self.generator.generate_image_answer_stream(retrieval_question, docs, vision_result)
+        for chunk in chunks:
             yield {"type": "token", "content": chunk}
         yield {"type": "done", "message": "completed"}
 
-    def _query_with_image(self, question: str, image_path: str, top_k: int, stream: bool):
+    def query_multi_image_events(
+        self,
+        question: str,
+        image_paths: list[str],
+        top_k: int = 5,
+        sensor_data: dict[str, Any] | None = None,
+    ):
+        """Yield step/token/done dictionaries for SSE multi-image analysis."""
+        if not self.vision_extractor or not self.template_engine:
+            raise RuntimeError("视觉提取或 Cypher 模板引擎尚未初始化")
+
+        image_urls = [self.vision_extractor._image_to_url(path) for path in image_paths]
+        observations = []
+        yield {
+            "type": "step",
+            "step": "multi_image_observe",
+            "message": f"正在分别观察 {len(image_urls)} 张图片...",
+        }
+        for index, image_url in enumerate(image_urls, start=1):
+            observation = self.vision_extractor.observe(
+                image_url=image_url,
+                user_question=(
+                    f"{question}\n这是同一现场的第 {index}/{len(image_urls)} 张照片，请保留跨图关联线索。"
+                ),
+            )
+            observations.append(observation)
+
+        uncertain = self.vision_extractor._unique_strings(
+            concept
+            for observation in observations
+            for concept in observation.get("uncertain_concepts", [])
+        )
+        yield {
+            "type": "step",
+            "step": "multi_image_observe_done",
+            "message": f"完成 {len(observations)} 张图片观察，合并 {len(uncertain)} 个待确认概念",
+            "data": {
+                "image_count": len(observations),
+                "uncertain_concepts": uncertain,
+            },
+        }
+
+        yield {"type": "step", "step": "concept_search", "message": "正在合并检索通风概念定义..."}
+        merged_observation = self.vision_extractor._merge_observations(observations)
+        concepts = self.vision_extractor.retrieve_concepts(merged_observation)
+        concept_names = [getattr(card, "name", "") for card in concepts if getattr(card, "name", "")]
+        yield {
+            "type": "step",
+            "step": "concept_search_done",
+            "message": f"检索到 {len(concepts)} 个概念定义",
+            "data": {"concept_count": len(concepts), "concepts": concept_names},
+        }
+
+        yield {"type": "step", "step": "multi_image_analyze", "message": "正在进行多图联合分析..."}
+        vision_result = self.vision_extractor.analyze_multi_with_concepts(
+            image_urls=image_urls,
+            user_question=question,
+            observations=observations,
+            concepts=concepts,
+        )
+        yield {
+            "type": "step",
+            "step": "multi_image_analyze_done",
+            "message": f"场景：{vision_result.scene_name} | 风险：{vision_result.risk_level}",
+            "data": {
+                "scene_id": vision_result.scene_id,
+                "scene_name": vision_result.scene_name,
+                "risk_level": vision_result.risk_level,
+                "primary_hazard": vision_result.primary_hazard,
+                "key_observations": vision_result.key_observations,
+                "cross_image_findings": vision_result.cross_image_findings,
+            },
+        }
+
+        yield {"type": "step", "step": "cypher_match", "message": "正在匹配规程模板..."}
+        retrieval_question, docs, match = self._retrieve_docs_for_image(
+            question,
+            vision_result,
+            top_k,
+            sensor_data=sensor_data,
+        )
+        yield {
+            "type": "step",
+            "step": "cypher_match_done",
+            "message": f"匹配到 {len(docs)} 条相关规程内容",
+            "data": {
+                "doc_count": len(docs),
+                "template_scene_id": getattr(match, "scene_id", None) if match else None,
+            },
+        }
+
+        if sensor_data:
+            entries = sensor_data.get("entries") or []
+            yield {"type": "step", "step": "sensor_compare", "message": "正在核对传感器数据与规程阈值..."}
+            yield {
+                "type": "step",
+                "step": "sensor_compare_done",
+                "message": f"已接入 {len(entries)} 条传感器数据",
+                "data": {"sensor_count": len(entries)},
+            }
+
+        yield {"type": "step", "step": "generating", "message": "正在生成融合辨识报告..."}
+        for chunk in self.generator.generate_multimodal_answer_stream(
+            retrieval_question,
+            docs,
+            vision_result=vision_result,
+            sensor_data=sensor_data,
+        ):
+            yield {"type": "token", "content": chunk}
+        yield {"type": "done", "message": "completed"}
+
+    def _query_with_image(
+        self,
+        question: str,
+        image_path: str,
+        top_k: int,
+        stream: bool,
+        sensor_data: dict[str, Any] | None = None,
+    ):
         if not self.vision_extractor or not self.template_engine:
             raise RuntimeError("视觉提取或 Cypher 模板引擎尚未初始化")
 
         logger.info("执行图片前置识别: %s", image_path)
         vision_result = self.vision_extractor.extract(image_path=image_path, user_question=question)
-        retrieval_question, docs, _match = self._retrieve_docs_for_image(question, vision_result, top_k)
+        retrieval_question, docs, _match = self._retrieve_docs_for_image(
+            question,
+            vision_result,
+            top_k,
+            sensor_data=sensor_data,
+        )
 
         if stream:
+            if sensor_data:
+                return self.generator.generate_multimodal_answer_stream(
+                    retrieval_question,
+                    docs,
+                    vision_result=vision_result,
+                    sensor_data=sensor_data,
+                )
             return self.generator.generate_image_answer_stream(retrieval_question, docs, vision_result)
+        if sensor_data:
+            return self.generator.generate_multimodal_answer(
+                retrieval_question,
+                docs,
+                vision_result=vision_result,
+                sensor_data=sensor_data,
+            )
         return self.generator.generate_image_answer(retrieval_question, docs, vision_result)
 
-    def _retrieve_docs_for_image(self, question: str, vision_result: Any, top_k: int):
+    def _query_with_multi_image(
+        self,
+        question: str,
+        image_paths: list[str],
+        top_k: int,
+        sensor_data: dict[str, Any] | None = None,
+    ):
+        if not self.vision_extractor or not self.template_engine:
+            raise RuntimeError("视觉提取或 Cypher 模板引擎尚未初始化")
+
+        logger.info("执行多图片前置识别: %s 张", len(image_paths))
+        vision_result = self.vision_extractor.extract_multi(image_paths=image_paths, user_question=question)
+        retrieval_question, docs, _match = self._retrieve_docs_for_image(
+            question,
+            vision_result,
+            top_k,
+            sensor_data=sensor_data,
+        )
+        return self.generator.generate_multimodal_answer(
+            retrieval_question,
+            docs,
+            vision_result=vision_result,
+            sensor_data=sensor_data,
+        )
+
+    def _retrieve_docs_for_image(
+        self,
+        question: str,
+        vision_result: Any,
+        top_k: int,
+        sensor_data: dict[str, Any] | None = None,
+    ):
         retrieval_question = self._build_image_retrieval_question(question, vision_result)
+        if sensor_data:
+            retrieval_question = self._build_sensor_retrieval_question(retrieval_question, sensor_data)
         docs, match = self.template_engine.execute(
             driver=self.connection_manager.get_neo4j_driver(),
             structured_fields=vision_result.structured_fields,
@@ -300,8 +556,14 @@ class VentilationRAGPipeline:
             top_k=top_k,
         )
 
-        if len(docs) < top_k and vision_result.description:
-            fallback_docs = self.hybrid_ret.hybrid_search(vision_result.description, top_k=top_k)
+        fallback_query = vision_result.description
+        if sensor_data:
+            fallback_query = self._build_sensor_retrieval_question(
+                fallback_query or question,
+                sensor_data,
+            )
+        if (len(docs) < top_k or sensor_data) and fallback_query:
+            fallback_docs = self.hybrid_ret.hybrid_search(fallback_query, top_k=top_k)
             docs = self._merge_docs(docs, fallback_docs)
 
         for doc in docs:
@@ -324,20 +586,108 @@ class VentilationRAGPipeline:
             for key, value in vision_result.structured_fields.items()
             if value is not None
         }
+        per_image = getattr(vision_result, "per_image_observations", {}) or {}
+        cross_findings = getattr(vision_result, "cross_image_findings", []) or []
         return (
             f"{question}\n\n"
             f"【图片识别场景】{vision_result.scene_name} ({vision_result.scene_id})\n"
             f"【风险等级】{getattr(vision_result, 'risk_level', '需要注意')}\n"
             f"【主要隐患】{getattr(vision_result, 'primary_hazard', '')}\n"
             f"【关键观察】{getattr(vision_result, 'key_observations', [])}\n"
+            f"【每图观察】{per_image}\n"
+            f"【跨图关联】{cross_findings}\n"
             f"【图片结构化字段】{structured}\n"
             f"【图片描述】{vision_result.description}"
         )
 
+    def _build_sensor_retrieval_question(self, question: str, sensor_data: dict[str, Any]) -> str:
+        entries = sensor_data.get("entries") if isinstance(sensor_data, dict) else []
+        if not isinstance(entries, list) or not entries:
+            return question
+
+        lines = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            label = entry.get("label") or entry.get("type") or "未知参数"
+            value = entry.get("value", "")
+            unit = entry.get("unit") or ""
+            location = entry.get("location") or sensor_data.get("location") or ""
+            timestamp = entry.get("timestamp") or ""
+            lines.append(f"- {label}: {value}{unit}，地点：{location}，时间：{timestamp}")
+
+        sensor_keywords = " ".join(
+            [
+                "风速 最低风速 最高风速 瓦斯 甲烷 一氧化碳 CO 温度 氧气 浓度 传感器 阈值 超限 规程",
+                " ".join(lines),
+            ]
+        )
+        return f"{question}\n\n【传感器实测数据】\n{chr(10).join(lines)}\n\n【检索提示】{sensor_keywords}"
+
+    def _normalize_image_paths(
+        self,
+        image_path: str | None = None,
+        image_paths: list[str] | tuple[str, ...] | None = None,
+    ) -> list[str]:
+        paths: list[str] = []
+        if image_paths:
+            paths.extend(str(path) for path in image_paths if path)
+        if image_path:
+            paths.append(str(image_path))
+
+        normalized = []
+        seen = set()
+        for path in paths:
+            text = path.strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            normalized.append(text)
+        return normalized
+
+    def _normalize_sensor_data(self, sensor_data: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(sensor_data, dict):
+            return None
+        entries = sensor_data.get("entries")
+        if not isinstance(entries, list):
+            return None
+
+        cleaned_entries = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                value = float(entry.get("value"))
+            except (TypeError, ValueError):
+                continue
+            label = str(entry.get("label") or entry.get("type") or "").strip()
+            if not label:
+                continue
+            cleaned_entries.append(
+                {
+                    "type": str(entry.get("type") or "custom").strip() or "custom",
+                    "label": label,
+                    "value": value,
+                    "unit": str(entry.get("unit") or "").strip(),
+                    "location": str(entry.get("location") or sensor_data.get("location") or "").strip(),
+                    "timestamp": str(entry.get("timestamp") or "").strip(),
+                    "thresholdRef": str(entry.get("thresholdRef") or "").strip(),
+                }
+            )
+
+        if not cleaned_entries:
+            return None
+        return {
+            "entries": cleaned_entries,
+            "location": str(sensor_data.get("location") or cleaned_entries[0].get("location") or "未标注地点").strip(),
+            "source": "csv" if sensor_data.get("source") == "csv" else "manual",
+            "rawCsv": str(sensor_data.get("rawCsv") or "") if sensor_data.get("source") == "csv" else "",
+        }
+
     def _merge_docs(self, primary_docs, fallback_docs):
         merged = []
         seen = set()
-        for doc in primary_docs + fallback_docs:
+        for doc in (primary_docs or []) + (fallback_docs or []):
             key = (
                 doc.metadata.get("node_id"),
                 doc.metadata.get("article_name"),

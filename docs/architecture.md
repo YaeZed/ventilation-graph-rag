@@ -2,7 +2,7 @@
 
 ## 目标
 
-本项目将《煤矿安全规程》通风相关知识构建为 Neo4j 图谱和 Milvus 向量索引，并通过 RAG、Cypher 模板和 Qwen3.5-Omni 支持文字问答与现场图片隐患辨识。
+本项目将《煤矿安全规程》通风相关知识构建为 Neo4j 图谱和 Milvus 向量索引，并通过 RAG、Cypher 模板和 Qwen3.5-Omni 支持文字问答、现场图片/多图片隐患辨识，以及传感器数值与规程阈值的交叉验证。
 
 ## 顶层数据流
 
@@ -12,9 +12,10 @@ flowchart LR
   B --> C["DataPreparation: Neo4j -> Documents"]
   C --> D["MilvusIndex: BGE embedding -> Milvus"]
   Q["文字问题"] --> R["QueryRouter"]
-  IMG["现场图片"] --> OBS["Qwen3.5-Omni 初步观察"]
+  SENSOR["传感器数据"] --> GEN
+  IMG["现场图片 / 多图片"] --> OBS["Qwen3.5-Omni 初步观察"]
   OBS --> CONCEPT["通风概念检索"]
-  CONCEPT --> VL["Qwen3.5-Omni 概念增强分析"]
+  CONCEPT --> VL["Qwen3.5-Omni 概念增强/多图联合分析"]
   VL --> T["Cypher 模板检索"]
   R --> H["Hybrid Retrieval"]
   R --> G["GraphRAG Retrieval"]
@@ -40,7 +41,7 @@ flowchart LR
 
 | 模块 | 当前职责 |
 |---|---|
-| `VentilationRAGPipeline` | 统一初始化连接、索引、检索、生成和图片入口 |
+| `VentilationRAGPipeline` | 统一初始化连接、索引、检索、生成、传感器数据和图片/多图片入口 |
 | `VentilationDataPreparationModule` | 从 Neo4j 读取图谱内容并转换为 LangChain `Document` |
 | `VentilationMilvusIndexConstruction` | 将文档嵌入并写入 Milvus collection |
 | `VentilationHybridRetrieval` | Milvus 向量检索 + Neo4j 图关键词检索 |
@@ -48,12 +49,12 @@ flowchart LR
 | `VentilationQueryRouter` | 根据问题复杂度选择 hybrid / graph / combined |
 | `VentilationCypherTemplateEngine` | 根据结构化字段匹配和执行确定性 Cypher 模板 |
 | `VentilationConceptRetriever` | 从 Neo4j/Milvus/内置兜底概念中检索通风概念定义卡片 |
-| `VentilationVisionExtractor` | Qwen3.5-Omni 初步观察、概念检索、概念增强分析和结构化字段抽取 |
-| `VentilationGeneration` | 根据检索文档、图片观察结果和概念卡片生成 Markdown 格式回答 |
+| `VentilationVisionExtractor` | Qwen3.5-Omni 初步观察、概念检索、概念增强分析、多图联合分析和结构化字段抽取 |
+| `VentilationGeneration` | 根据检索文档、图片观察结果、传感器数据和概念卡片生成 Markdown 格式回答 |
 
-## 图片识别链路
+## 图片/多图/传感器链路
 
-图片请求固定走串行流程，并在 SSE 中向前端输出步骤进度：
+单图图片请求固定走串行流程，并在 SSE 中向前端输出步骤进度：
 
 1. Django 保存上传图片到 `web_backend/media/` 临时文件。
 2. `VentilationVisionExtractor.observe()` 先做低温初步观察，输出原始观察、不确定概念和关键线索。
@@ -64,13 +65,17 @@ flowchart LR
 7. 生成模块输出 Markdown 辨识报告。
 8. Django 删除临时图片文件。
 
+多图片请求复用同一入口，但 `VentilationVisionExtractor.extract_multi()` 会先对每张图片独立执行 `observe()`，再合并不确定概念并调用 `analyze_multi_with_concepts()`。联合分析结果包含 `per_image_observations` 和 `cross_image_findings`，用于报告中说明“每张图看到什么”和“跨图共同指向什么”。
+
+传感器数据从前端以结构化 JSON 传入 `sensor_data`，包含参数类型、显示名、数值、单位、地点和时间。`VentilationRAGPipeline` 会把这些数值加入检索问题，用“风速/瓦斯/CO/温度/氧气/阈值/超限”等关键词增强规程检索；生成层使用 `_build_multimodal_prompt()` 输出图片证据、传感器实测数据、参考规程和交叉验证分析。没有图片时，传感器数据也可以单独触发多模态 prompt。
+
 ## Web 层
 
 Django 不在 app 启动时立即加载 RAG，而是通过 `web_backend/chat/pipeline_service.py` 懒加载单例 `VentilationRAGPipeline`。第一次问答会触发初始化，后续请求复用同一 pipeline。
 
 前端用 Vite 代理 `/api` 到 `127.0.0.1:8000`。助手消息使用 `markdown-it` 渲染 Markdown，并关闭原始 HTML。
 
-图片流式请求除 `status`、`token`、`done`、`error` 外，还会接收 `step` 事件。前端将 `vision_observe`、`concept_search`、`vision_analyze`、`cypher_match`、`generating` 显示为可折叠 Agent 步骤，避免长时间图片分析时用户只看到静态“正在生成”。
+图片流式请求除 `status`、`token`、`done`、`error` 外，还会接收 `step` 事件。前端将 `vision_observe`、`multi_image_observe`、`concept_search`、`vision_analyze`、`multi_image_analyze`、`sensor_compare`、`cypher_match`、`generating` 显示为可折叠 Agent 步骤，避免长时间图片/多图/传感器分析时用户只看到静态“正在生成”。
 
 ## 前端用户模块
 
@@ -84,9 +89,9 @@ Django 不在 app 启动时立即加载 RAG，而是通过 `web_backend/chat/pip
 | `/stats` | 会话统计和 JSON 导出 |
 | `/settings` | 本地偏好设置 |
 
-用户层状态集中在 `frontend/src/stores/chat.ts`。Pinia store 管理 `Conversation` 列表、当前会话、发送状态、搜索词、简易用户身份、偏好设置和账号同步状态。持久化采用账号作用域 key：游客写入 `localStorage` key `ventilation-graph-rag:user-module:v2:guest`，登录用户写入 `ventilation-graph-rag:user-module:v2:user:<userId>`，旧 `ventilation-graph-rag:user-module:v1` 仅作为游客迁移兼容。未登录时保持本地优先；已有账号登录只加载该账号本地缓存和后端会话，注册新账号时才把游客本地会话迁移到账号。发送状态、SSE 回写、输入草稿和待上传图片预览都按 `conversationId` 隔离。
+用户层状态集中在 `frontend/src/stores/chat.ts`。Pinia store 管理 `Conversation` 列表、当前会话、发送状态、搜索词、简易用户身份、偏好设置和账号同步状态。持久化采用账号作用域 key：游客写入 `localStorage` key `ventilation-graph-rag:user-module:v2:guest`，登录用户写入 `ventilation-graph-rag:user-module:v2:user:<userId>`，旧 `ventilation-graph-rag:user-module:v1` 仅作为游客迁移兼容。未登录时保持本地优先；已有账号登录只加载该账号本地缓存和后端会话，注册新账号时才把游客本地会话迁移到账号。发送状态、SSE 回写、输入草稿、待上传图片队列和待提交传感器数据都按 `conversationId` 隔离。
 
-后端用户模块位于 `web_backend/users/`，使用 Django 内置 `User` 和 session 登录。`UserProfile` 保存昵称、头像文字和偏好设置，`Team` 和 `TeamMembership` 提供团队空间与 `owner/admin/member` 三档角色。`ConversationRecord` 以 `(user, client_id)` 唯一约束保存前端会话快照、归档状态、元数据和消息 JSON，并通过可空 `team` 外键表示个人空间或团队空间。`ConversationAttachment` 保存登录用户上传的图片附件，开发期文件落在 `web_backend/media/conversation_attachments/`，前端消息只保存附件引用。P5 起用户模块启用 Django CSRF、密码校验器、登录失败限流、session cookie 安全配置和 `SecurityEvent` 账号安全事件记录；生产部署仍需要正式数据库、反向代理、静态/media 托管和跨域策略评审。
+后端用户模块位于 `web_backend/users/`，使用 Django 内置 `User` 和 session 登录。`UserProfile` 保存昵称、头像文字和偏好设置，`Team` 和 `TeamMembership` 提供团队空间与 `owner/admin/member` 三档角色。`ConversationRecord` 以 `(user, client_id)` 唯一约束保存前端会话快照、归档状态、元数据和消息 JSON，并通过可空 `team` 外键表示个人空间或团队空间。`ConversationAttachment` 保存登录用户上传的图片附件，开发期文件落在 `web_backend/media/conversation_attachments/`。前端本地缓存可在消息 `images[]` 中保留压缩 data URL 作为刷新兜底；同步到后端的会话快照会剥离 data URL，只保留附件 URL/元数据，附件上传失败时会用压缩预览重试。P5 起用户模块启用 Django CSRF、密码校验器、登录失败限流、session cookie 安全配置和 `SecurityEvent` 账号安全事件记录；生产部署仍需要正式数据库、反向代理、静态/media 托管和跨域策略评审。
 
 `/settings` 是账号和团队管理入口。登录用户可创建团队、按用户名添加成员、调整 `admin/member` 角色、移除成员。会话归属不在设置页处理，而是在每个对话的三点菜单中通过“归属团队”子菜单显式选择。P4+ 不自动共享历史个人会话，避免加入团队后暴露旧记录。
 

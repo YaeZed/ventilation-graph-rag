@@ -99,3 +99,30 @@
 - Account security can keep the API's recent 20 events, but the settings UI should constrain the visible list to about five rows with a scrollbar to preserve card alignment.
 - Team name editing belongs inline beside the selected team title for owner/admin users; after team mutations, refresh teams and members from the backend instead of relying only on optimistic state.
 - Native `select` controls are not reliable for this UI because OS option styling can override colors. Use `SettingsSelect.vue` in settings/team/stat controls and keep global `.page-header` button rules scoped to direct action buttons.
+
+## Team-Space Remark/Delete Polish Findings
+
+- `Team.description` already exists in `web_backend/users/models.py`, is serialized by `_serialize_team()`, and is accepted by create/update APIs, so remark editing is a frontend-only Settings UI change.
+- Inline edit should submit both `name` and `description` together. Auto-saving on first input blur would interrupt editing the second field, so this flow needs explicit save/cancel controls.
+- Delete confirmation should be local UI state scoped to the selected team id, and it should reset when selection changes to avoid confirming deletion for a stale team.
+
+## Sensor Multi-Image Module Findings
+
+- `docs/plan-sensor-multiimage.md` defines the active scope: sensor readings, multi-image draft upload, and fused image/data/regulation reporting.
+- Current frontend only stores one pending `File`, one `imageUrl`, and the first attachment per message. Multi-image support needs a separate `images[]` display model while keeping legacy fields.
+- Current Django chat endpoints accept only `image`; multipart handlers need `images` lists plus legacy fallback for one-file callers.
+- Current pipeline branches on a single `image_path`. Multi-image and sensor-enhanced requests need explicit routing so legacy text-only and single-image behavior remains stable.
+- Current generation has `_build_image_prompt`; sensor fusion should be a new multimodal prompt rather than weakening the existing single-image path.
+- Tooling note: `rg.exe` is access-denied in this sandbox, and `session-catchup.py` can crash on GBK output. Use Git/PowerShell-native inspection and log failures instead of repeating the same commands.
+- The implemented frontend keeps legacy `imageUrl` for compatibility, but message display/PDF export prefer `attachments[]` and `images[]` so multi-image messages render all evidence.
+- Django accepts repeated multipart `images` while also appending legacy `image` for old clients; backend `_uploaded_images()` intentionally reads `images` first to avoid duplicating the first file.
+- Pipeline routing is explicit: text-only uses existing adaptive answer, sensor-only uses multimodal prompt without a vision block, single image without sensors uses existing image prompt, and multi-image or sensor-enhanced paths use multimodal generation.
+- Multi-image analysis should remain sequential for now. It is slower, but it preserves per-image observations for auditability and avoids mixing visual evidence before concept retrieval.
+- The sensor manual type dropdown was the remaining native `select` in the multimodal input panel. Reusing `SettingsSelect.vue` requires scoping `.sensor-row` button styles; otherwise the shared select trigger/options inherit the circular delete-button styling.
+- The reported scenario 2 failure is in the Django SSE adapter, not the sensor UI or RAG pipeline. `_stream_pipeline_events()` normalizes images into `image_path_texts`, but its no-image completion check still referenced the removed `image_path_text` single-image variable.
+- `.multi-image-list` originally stretched all children to the tallest thumbnail card. Since `.multi-image-add` had width but no height, it became a tall dashed rectangle after the first image was added. Fix it by centering list items and giving the add button fixed 44px dimensions.
+- Sent-image disappearance can happen when authenticated remote sync returns a conversation payload whose messages do not include attachment/image fields. Backend serialization should attach `ConversationAttachment` rows back to their `messageClientId`, and frontend merge should preserve local media fields when remote messages lack media.
+- The screenshot retest showed the backend had already received the image (`观察图片` step) while the user card only showed sensor data. The immediate UI path must not depend on attachment URL availability. User messages now receive local data-URL thumbnails before upload/sync, and successful authenticated uploads replace those thumbnails with backend attachment URLs for persistence.
+- Opening a message image in a new tab breaks the chat workflow. The thumbnail should act as an in-place zoom control, using a fixed overlay teleported to `body` so it is not clipped by the scrollable message area.
+- Refresh loss after the local-preview fix can still happen for authenticated users because `saveToStorage()` previously removed data URLs for logged-in scopes. The correct split is: keep compressed local previews in browser storage for refresh resilience, but strip data URLs only for remote sync/export-to-backend. Attachment uploads also need a compressed-preview retry path because the backend rejects original files above 8 MB.
+- Neat-freak sync clarified the durable boundary: `saveToStorage()` keeps compressed message `images[]` previews locally, `syncWithRemote()` calls `sanitizeConversationForStorage(..., false)` before backend sync, and `ConversationAttachment.messageClientId` is the cross-refresh join key that restores backend media onto user messages.
