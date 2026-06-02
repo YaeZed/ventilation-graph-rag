@@ -62,7 +62,7 @@
 
               <div v-if="messageImages(message).length" class="message-image-grid">
                 <figure
-                  v-for="image in messageImages(message)"
+                  v-for="(image, imageIndex) in messageImages(message)"
                   :key="image.id"
                   class="image-frame"
                 >
@@ -70,7 +70,7 @@
                     class="message-image-button"
                     type="button"
                     :title="`查看 ${image.name}`"
-                    @click="openImagePreview(image)"
+                    @click="openImagePreview(messageImages(message), imageIndex)"
                   >
                     <img class="message-image" :src="image.url" :alt="image.name" />
                   </button>
@@ -188,6 +188,16 @@
       >
         <figure class="image-preview-dialog">
           <button
+            v-if="hasPreviewNavigation"
+            class="image-preview-nav previous"
+            type="button"
+            title="上一张"
+            aria-label="上一张图片"
+            @click.stop="showPreviousPreview"
+          >
+            ‹
+          </button>
+          <button
             class="image-preview-close"
             type="button"
             title="关闭预览"
@@ -196,7 +206,17 @@
             ×
           </button>
           <img :src="previewImage.url" :alt="previewImage.name" />
-          <figcaption>{{ previewImage.name }}</figcaption>
+          <figcaption>{{ previewCaption }}</figcaption>
+          <button
+            v-if="hasPreviewNavigation"
+            class="image-preview-nav next"
+            type="button"
+            title="下一张"
+            aria-label="下一张图片"
+            @click.stop="showNextPreview"
+          >
+            ›
+          </button>
         </figure>
       </div>
     </Teleport>
@@ -227,7 +247,8 @@ const router = useRouter()
 const drafts = reactive<Record<string, InputDraft>>({})
 const fileInput = ref<HTMLInputElement | null>(null)
 const messagesEl = ref<HTMLElement | null>(null)
-const previewImage = ref<ChatMessageImage | null>(null)
+const previewImages = ref<ChatMessageImage[]>([])
+const previewIndex = ref(0)
 const collapsedSteps = reactive<Record<string, boolean>>({})
 const scrollPositions = new Map<string, number>()
 const pendingScrollRestoreId = ref('')
@@ -236,6 +257,14 @@ let scrollRestoreTimer = 0
 const draftKey = computed(() => chat.activeId || 'new')
 const activeDraft = computed(() => getDraft(draftKey.value))
 const firstDraftImage = computed(() => activeDraft.value.images[0] || null)
+const previewImage = computed(() => previewImages.value[previewIndex.value] || null)
+const hasPreviewNavigation = computed(() => previewImages.value.length > 1)
+const previewCaption = computed(() => {
+  const image = previewImage.value
+  if (!image) return ''
+  if (!hasPreviewNavigation.value) return image.name
+  return `${previewIndex.value + 1} / ${previewImages.value.length} · ${image.name}`
+})
 const hasDraftContext = computed(
   () =>
     activeDraft.value.images.length > 0 ||
@@ -399,16 +428,41 @@ const exportCurrent = () => {
   chat.exportConversationAsPDF(chat.activeId)
 }
 
-const openImagePreview = (image: ChatMessageImage) => {
-  previewImage.value = image
+const openImagePreview = (images: ChatMessageImage[], index: number) => {
+  previewImages.value = images
+  previewIndex.value = Math.min(Math.max(index, 0), images.length - 1)
 }
 
 const closeImagePreview = () => {
-  previewImage.value = null
+  previewImages.value = []
+  previewIndex.value = 0
+}
+
+const showPreviousPreview = () => {
+  if (!hasPreviewNavigation.value) return
+  previewIndex.value =
+    (previewIndex.value - 1 + previewImages.value.length) % previewImages.value.length
+}
+
+const showNextPreview = () => {
+  if (!hasPreviewNavigation.value) return
+  previewIndex.value = (previewIndex.value + 1) % previewImages.value.length
 }
 
 const handlePreviewKeydown = (event: KeyboardEvent) => {
-  if (event.key === 'Escape') closeImagePreview()
+  if (!previewImage.value) return
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    closeImagePreview()
+  }
+  if (event.key === 'ArrowLeft') {
+    event.preventDefault()
+    showPreviousPreview()
+  }
+  if (event.key === 'ArrowRight') {
+    event.preventDefault()
+    showNextPreview()
+  }
 }
 
 onMounted(() => {

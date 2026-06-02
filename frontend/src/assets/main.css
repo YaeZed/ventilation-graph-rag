@@ -521,7 +521,7 @@ a {
   z-index: 1000;
   inset: 0;
   display: grid;
-  padding: 32px;
+  padding: clamp(16px, 3vw, 32px);
   background: rgba(10, 20, 18, 0.64);
   place-items: center;
 }
@@ -529,28 +529,32 @@ a {
 .image-preview-dialog {
   position: relative;
   display: grid;
-  max-width: min(1120px, 92vw);
-  max-height: 88vh;
+  width: min(1120px, calc(100vw - 64px));
+  max-height: calc(100vh - 64px);
   margin: 0;
   gap: 10px;
   padding: 14px;
+  box-sizing: border-box;
   border: 1px solid rgba(226, 236, 232, 0.86);
   border-radius: 8px;
   background: #ffffff;
   box-shadow: 0 24px 72px rgba(4, 19, 15, 0.32);
+  grid-template-rows: minmax(0, auto) auto;
 }
 
 .image-preview-dialog img {
   display: block;
-  max-width: calc(92vw - 28px);
-  max-height: calc(88vh - 86px);
+  width: auto;
+  max-width: 100%;
+  max-height: calc(100vh - 148px);
+  justify-self: center;
   border-radius: 6px;
   background: #edf2f0;
   object-fit: contain;
 }
 
 .image-preview-dialog figcaption {
-  max-width: calc(92vw - 28px);
+  max-width: 100%;
   overflow: hidden;
   color: #4f625c;
   font-size: 13px;
@@ -580,6 +584,56 @@ a {
 
 .image-preview-close:hover {
   background: #f4faf8;
+}
+
+.image-preview-nav {
+  position: absolute;
+  top: 50%;
+  display: grid;
+  width: 38px;
+  height: 56px;
+  border: 1px solid rgba(216, 227, 223, 0.92);
+  border-radius: 8px;
+  color: #27433d;
+  background: rgba(255, 255, 255, 0.92);
+  cursor: pointer;
+  font-size: 42px;
+  line-height: 1;
+  place-items: center;
+  transform: translateY(-50%);
+  box-shadow: 0 12px 28px rgba(14, 32, 28, 0.22);
+}
+
+.image-preview-nav:hover {
+  background: #f4faf8;
+}
+
+.image-preview-nav.previous {
+  left: -52px;
+}
+
+.image-preview-nav.next {
+  right: -52px;
+}
+
+@media (max-width: 760px) {
+  .image-preview-dialog {
+    width: calc(100vw - 32px);
+  }
+
+  .image-preview-nav {
+    width: 34px;
+    height: 48px;
+    font-size: 34px;
+  }
+
+  .image-preview-nav.previous {
+    left: 10px;
+  }
+
+  .image-preview-nav.next {
+    right: 10px;
+  }
 }
 
 .ai-text {
