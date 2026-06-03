@@ -1,4 +1,5 @@
 import type { ChatAttachment, ChatStats, Conversation, UserProfile, UserSettings } from '@/stores/chat'
+import { friendlyHttpError } from '@/api/errors'
 
 export type RemoteUser = {
   id: number
@@ -457,6 +458,6 @@ async function parseJson(response: Response) {
   try {
     return JSON.parse(rawText)
   } catch {
-    throw new Error(rawText || `HTTP ${response.status}`)
+    throw new Error(friendlyHttpError(response, rawText))
   }
 }

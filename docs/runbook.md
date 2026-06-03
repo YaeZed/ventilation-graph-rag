@@ -37,7 +37,7 @@ MILVUS_PORT=19530
 QWEN_VL_MODEL=qwen3.5-omni-plus
 DJANGO_DEBUG=1
 DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1
-DJANGO_CSRF_TRUSTED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+DJANGO_CSRF_TRUSTED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174
 DJANGO_SESSION_COOKIE_AGE=604800
 ACCOUNT_LOGIN_FAILURE_LIMIT=5
 ACCOUNT_LOGIN_LOCKOUT_SECONDS=300
@@ -94,6 +94,8 @@ npm run dev
 
 打开 `http://127.0.0.1:5173`。
 
+如果 Vite 因 5173 被占用自动切到 `http://127.0.0.1:5174`，Django 也需要信任这个前端来源。默认开发配置已包含 5173/5174；如果 `.env` 手动设置了 `DJANGO_CSRF_TRUSTED_ORIGINS`，需要把当前前端地址加入该变量并重启 Django，否则登录后的会话同步会被 CSRF Origin 校验拦截。
+
 本地开发时建议让 Django 后端和 Vite 前端分别占用一个前台终端。Codex 桌面环境里，Django 后端进程如果被后台启动可能会被会话清理；需要稳定调试接口时，直接在 PowerShell 中运行上面的 `runserver` 命令并保持窗口打开。
 
 ## 构建概念知识层
@@ -135,14 +137,15 @@ npm run build
 3. 刷新浏览器后，会话、昵称、偏好设置仍存在；若上传过图片，预览和导出内容应优先保留。
 4. 搜索会按标题、场景、风险等级、日期和消息内容过滤未归档会话。
 5. 会话三点菜单可重命名、归档、导出 PDF、删除；归档区在列表底部，可展开/收起，点击归档项会恢复该会话。
-6. `/stats` 显示会话统计并可导出 JSON；游客模式显示“本地统计”，登录后应显示“个人后端统计”，选择团队后应显示“团队统计”。后端加载失败时回退本地统计。重点检查完成率圆环、风险等级分布、近 7 天趋势和场景分布。`/settings` 可修改昵称、默认流式响应、Agent 步骤展开偏好和 temperature。
+6. `/stats` 显示会话统计并可导出 JSON；游客模式显示“本地统计”，登录后应显示“个人后端统计”，选择团队后应显示“团队统计”。后端加载失败时回退本地统计。重点检查完成率圆环、风险等级分布、近 7 天趋势和场景分布。`/settings` 可修改昵称、默认流式响应、Agent 步骤展开偏好、temperature 和模型服务配置。
 7. 访问 `/register` 创建账号后回到 `/chat`；游客本地会话应迁移到新账号并同步到后端。访问 `/login` 登录已有账号时，只应恢复该账号自己的会话、昵称和偏好设置，不应继承游客或其他账号的会话。
 8. `/settings` 在登录后显示账号同步状态，可手动“立即同步”或退出登录；退出后回到本地模式。
-9. 登录状态下上传图片后，消息应立即显示图片；点击缩略图应在当前页面中央放大预览而不是打开新页面；刷新页面后仍能显示。浏览器 `localStorage` 可以保存压缩后的消息 `images[]` 预览兜底，但不应保存原始大图；同步到后端的会话快照应只保留附件 URL/元数据。
+9. 登录状态下上传图片后，消息应立即显示图片；点击缩略图应在当前页面中央放大预览而不是打开新页面，长图不应超出弹层边框。多图消息的预览应显示左右箭头，并支持键盘 `←` / `→` 切换、`Esc` 关闭；刷新页面后仍能显示。浏览器 `localStorage` 可以保存压缩后的消息 `images[]` 预览兜底，但不应保存原始大图；同步到后端的会话快照应只保留附件 URL/元数据。
 10. 登录后在 `/settings` 创建团队并按用户名添加成员；回到侧边栏对话三点菜单，通过“归属团队”子菜单把当前会话切到团队。子菜单应固定显示在主菜单右侧，移动鼠标到子菜单时不应消失。成员账号刷新后，“最近对话”下方的“团队对话”应能看到并只读打开这条会话，副标题应显示团队名和放入者身份名。再到 `/stats` 选择该团队，团队统计应包含显式分配到团队的会话。非团队成员访问带 `teamId` 的统计接口和团队会话接口应返回 403。
 11. `/settings` 登录后应显示“账号安全”记录；列表高度约为 5 条记录并可滚动。连续输错同一账号密码 5 次后，登录接口应返回 429 并提示稍后再试。
-12. `/settings` 的团队选择、成员角色选择和 `/stats` 的统计范围选择应使用同一套浅色下拉样式；鼠标悬停和选中态不应出现系统蓝色或白字空白。
-13. 在 `/chat` 输入区点击 `+` 连续选择 2-3 张图片，缩略图队列应显示在输入框上方；点击“数”录入风速/瓦斯等传感器数据或粘贴 CSV，消息发送后应显示多图网格和传感器数据条。SSE 步骤应包含多图观察/联合分析或传感器核对；报告应包含图片证据、传感器数据和规程依据的交叉验证。登录状态下刷新后，多图应优先使用附件 URL/元数据恢复，也可以使用本地压缩预览兜底；游客模式保留压缩 data URL。
+12. `/settings` 的团队选择、成员角色选择、模型服务商选择和 `/stats` 的统计范围选择应使用同一套浅色下拉样式；鼠标悬停和选中态不应出现系统蓝色或白字空白。
+13. 在 `/settings` 的“模型服务”面板选择 OpenAI、Ollama 或自定义配置后发起一次 `/chat` 请求；浏览器网络面板应看到请求携带 `model_config`。后端不应重建 Neo4j/Milvus 索引；只在当前请求内覆盖 text/VL 模型客户端，完成后恢复默认 pipeline。
+14. 在 `/chat` 输入区点击 `+` 连续选择 2-3 张图片，缩略图队列应显示在输入框上方；点击“数”录入风速/瓦斯等传感器数据或粘贴 CSV，消息发送后应显示多图网格和传感器数据条。SSE 步骤应包含多图观察/联合分析或传感器核对；报告应包含图片证据、传感器数据和规程依据的交叉验证。登录状态下刷新后，多图应优先使用附件 URL/元数据恢复，也可以使用本地压缩预览兜底；游客模式保留压缩 data URL。
 
 ## 常见问题
 
@@ -211,6 +214,18 @@ D:\Miniconda\envs\ventilation-identify-system\python.exe web_backend\manage.py m
 ### 图片请求很久没有完整报告
 
 图片链路会先调用 Qwen3.5-Omni 做观察，再检索概念、复核图片、检索规程并生成报告。前端应显示 `vision_observe`、`concept_search`、`vision_analyze`、`cypher_match`、`generating` 等步骤；如果只停在某一步，优先检查 DashScope 额度、模型名 `QWEN_VL_MODEL=qwen3.5-omni-plus`、后端日志和 SSE `error` 事件。
+
+### 模型服务测试连接失败
+
+`/settings` 的“测试连接”调用 `POST /api/chat/model/test/`，只测试 text/vision 两个 OpenAI-compatible `chat.completions` 调用，不会触发 RAG 检索、Neo4j/Milvus 索引或图片分析。若 text 失败，优先检查文本模型名、endpoint 和 text API key；若 vision 失败，优先检查视觉模型名、vision endpoint 和 vision API key。Ollama/vLLM 等本地服务需要确认后端进程所在机器能访问对应 endpoint。
+
+### 切换模型后仍像默认模型
+
+先确认 `/settings` 的模型服务字段已保存，再在浏览器网络面板检查 `/api/chat/`、`/api/chat/upload/` 或 `/api/chat/stream/` 请求是否包含 `model_config`。JSON 请求应直接带对象，multipart 请求应带 JSON 字符串。后端 `VentilationRAGPipeline` 只做请求级覆盖；如果没有 `model_config` 或字段为空，会回退 `.env` 中的默认 DashScope 配置。
+
+### 公开部署前的模型密钥边界
+
+当前本地开发允许用户未填 key 时回退 `.env` 的 `DASHSCOPE_API_KEY`。公开部署不能保留这个默认行为，否则普通用户会消耗维护者额度。部署前必须选择并实现一种策略：用户自带 key 且只保存在本地浏览器、用户自带 key 但后端加密保存，或管理员为特定租户配置受控 key。未配置用户 key 时，线上接口应提示先配置模型服务，而不是调用 `.env` 默认 key。
 
 ### DashScope 免费额度或请求中断
 

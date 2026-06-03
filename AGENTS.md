@@ -92,6 +92,7 @@ npm run dev
 - User-module write APIs are CSRF-protected. Frontend calls `GET /api/users/auth/csrf/` and sends `X-CSRFToken`; login/register rotate the token, so the frontend API wrapper refreshes the cached token from the cookie after responses.
 - P5 account security uses Django password validators, cache-backed login throttling, session cookie settings, and persisted `SecurityEvent` audit records shown in `/settings`.
 - Settings and stats dropdowns use `frontend/src/components/SettingsSelect.vue` instead of native `select`; keep this component's light styling isolated from global page-header button rules.
+- Runtime model config is currently development-friendly: missing per-user API keys can fall back to `.env` defaults. Do not ship that behavior as public deployment. Deployment work must enforce BYOK or an explicit tenant-key policy so ordinary users do not consume the project maintainer's model key.
 
 ## Environment Variables
 

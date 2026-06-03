@@ -1229,6 +1229,7 @@ a {
 }
 
 .settings-panel input[type="text"],
+.settings-panel input[type="password"],
 .settings-panel select {
   min-height: 38px;
   min-width: 0;
@@ -1264,6 +1265,10 @@ a {
 }
 
 .security-panel {
+  margin-bottom: 18px;
+}
+
+.model-config-panel {
   margin-bottom: 18px;
 }
 
@@ -1332,6 +1337,8 @@ a {
 
 .settings-error {
   color: var(--danger-color);
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .settings-section-header {
@@ -1479,6 +1486,83 @@ a {
   color: #8a9893;
   background: #f4f8f7;
   font-weight: 600;
+}
+
+.model-provider-select {
+  width: 180px;
+}
+
+.model-config-group {
+  display: grid;
+  gap: 12px;
+  padding-top: 2px;
+}
+
+.model-config-group + .model-config-group {
+  padding-top: 12px;
+  border-top: 1px solid #edf3f0;
+}
+
+.model-config-group-title {
+  display: flex;
+  align-items: center;
+  min-height: 24px;
+}
+
+.model-config-group-title strong {
+  color: #20352d;
+  font-size: 14px;
+}
+
+.model-config-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-top: 2px;
+}
+
+.model-test-result {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #d9e6e2;
+  border-radius: 8px;
+  background: #f8fbfa;
+}
+
+.model-test-result.success {
+  border-color: #bfded2;
+  background: #f3faf7;
+}
+
+.model-test-result.error {
+  border-color: #e4c8c2;
+  background: #fff7f5;
+}
+
+.model-test-result strong {
+  color: #20352d;
+  font-size: 14px;
+}
+
+.model-test-result p {
+  margin: 0;
+  color: #51655e;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.model-test-grid {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  gap: 8px 10px;
+  align-items: start;
+}
+
+.model-test-grid span {
+  color: #51655e;
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .team-members-block {
@@ -2218,8 +2302,26 @@ a {
   .team-select-row,
   .team-title-edit-form,
   .team-member-row,
+  .model-config-panel .settings-section-header,
   .sensor-row,
   .security-event-row {
+    grid-template-columns: 1fr;
+  }
+
+  .model-config-panel .settings-section-header {
+    display: grid;
+  }
+
+  .model-provider-select {
+    width: 100%;
+  }
+
+  .model-config-actions .auth-inline-button,
+  .model-config-actions .ghost-button {
+    width: 100%;
+  }
+
+  .model-test-grid {
     grid-template-columns: 1fr;
   }
 

@@ -16,12 +16,15 @@ from django.http import JsonResponse, StreamingHttpResponse
 from django.utils.text import get_valid_filename
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
+from openai import OpenAI
 
 from .pipeline_service import get_pipeline_service
 from .vision_evaluation import evaluate_vision_samples
 
 
 SSE_HEARTBEAT_SECONDS = 15
+MODEL_TEST_TIMEOUT_SECONDS = 20
+MODEL_TEST_MAX_TOKENS = 16
 
 
 def _json_error(message: str, status: int = 400):
@@ -68,6 +71,43 @@ def _load_sensor_data(value: Any):
     return value
 
 
+def _load_model_config(value: Any):
+    if not value:
+        return None
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(value, dict):
+        return None
+    provider = str(value.get("provider") or "").strip().lower()
+    if provider not in {"dashscope", "openai", "ollama", "custom"}:
+        provider = "custom"
+    config = {
+        "provider": provider,
+        "text_model": _clean_config_text(value.get("textModel") or value.get("text_model"), 120),
+        "text_endpoint": _clean_config_text(value.get("textEndpoint") or value.get("text_endpoint"), 300),
+        "text_api_key": _clean_config_text(value.get("textApiKey") or value.get("text_api_key"), 500),
+        "vision_model": _clean_config_text(value.get("visionModel") or value.get("vision_model"), 120),
+        "vision_endpoint": _clean_config_text(value.get("visionEndpoint") or value.get("vision_endpoint"), 300),
+        "vision_api_key": _clean_config_text(value.get("visionApiKey") or value.get("vision_api_key"), 500),
+    }
+    if not any(config.get(key) for key in ("text_model", "text_endpoint", "vision_model", "vision_endpoint")):
+        return None
+    return config
+
+
+def _clean_config_text(value: Any, max_length: int):
+    return str(value or "").strip()[:max_length]
+
+
+def _model_config_from_payload(payload: dict[str, Any] | None):
+    if not isinstance(payload, dict):
+        return None
+    return _load_model_config(payload.get("model_config") or payload.get("modelConfig") or payload)
+
+
 def _get_pipeline():
     return get_pipeline_service().get_pipeline()
 
@@ -102,8 +142,15 @@ def chat(request):
 
     top_k = int(payload.get("top_k") or 5)
     sensor_data = _load_sensor_data(payload.get("sensor_data") or payload.get("sensorData"))
+    model_config = _load_model_config(payload.get("model_config") or payload.get("modelConfig"))
     try:
-        answer = _get_pipeline().query(question, top_k=top_k, stream=False, sensor_data=sensor_data)
+        answer = _get_pipeline().query(
+            question,
+            top_k=top_k,
+            stream=False,
+            sensor_data=sensor_data,
+            model_config=model_config,
+        )
         return JsonResponse({"ok": True, "answer": answer})
     except Exception as exc:
         return _json_error(_friendly_error(exc), status=502)
@@ -119,6 +166,7 @@ def chat_upload(request):
 
     top_k = int(request.POST.get("top_k") or 5)
     sensor_data = _load_sensor_data(request.POST.get("sensor_data") or request.POST.get("sensorData"))
+    model_config = _load_model_config(request.POST.get("model_config") or request.POST.get("modelConfig"))
     image_paths = [_save_upload(image) for image in images]
     try:
         answer = _get_pipeline().query(
@@ -126,6 +174,7 @@ def chat_upload(request):
             top_k=top_k,
             image_paths=[str(path) for path in image_paths],
             sensor_data=sensor_data,
+            model_config=model_config,
             stream=False,
         )
         return JsonResponse({"ok": True, "answer": answer})
@@ -142,12 +191,14 @@ def chat_stream(request):
     question = ""
     image_paths: list[Path] = []
     sensor_data = None
+    model_config = None
     top_k = 5
 
     if request.content_type and request.content_type.startswith("multipart/form-data"):
         question = (request.POST.get("question") or request.POST.get("message") or "请判断图片中的通风安全隐患").strip()
         top_k = int(request.POST.get("top_k") or 5)
         sensor_data = _load_sensor_data(request.POST.get("sensor_data") or request.POST.get("sensorData"))
+        model_config = _load_model_config(request.POST.get("model_config") or request.POST.get("modelConfig"))
         image_paths = [_save_upload(image) for image in _uploaded_images(request)]
     else:
         payload = _load_json_body(request)
@@ -156,17 +207,94 @@ def chat_stream(request):
         question = (payload.get("question") or payload.get("message") or "").strip()
         top_k = int(payload.get("top_k") or 5)
         sensor_data = _load_sensor_data(payload.get("sensor_data") or payload.get("sensorData"))
+        model_config = _load_model_config(payload.get("model_config") or payload.get("modelConfig"))
 
     if not question:
         return _json_error("缺少 question/message")
 
     response = StreamingHttpResponse(
-        _stream_pipeline_events(question, top_k, image_paths, sensor_data),
+        _stream_pipeline_events(question, top_k, image_paths, sensor_data, model_config),
         content_type="text/event-stream; charset=utf-8",
     )
     response["Cache-Control"] = "no-cache"
     response["X-Accel-Buffering"] = "no"
     return response
+
+
+@csrf_exempt
+@require_POST
+def model_test(request):
+    payload = _load_json_body(request)
+    if payload is None:
+        return _json_error("请求体必须是 JSON")
+
+    model_config = _model_config_from_payload(payload)
+    if not model_config:
+        return _json_error("缺少模型配置")
+
+    results = {
+        "text": _test_model_config_part(model_config, "text"),
+        "vision": _test_model_config_part(model_config, "vision"),
+    }
+    ok = all(result["ok"] for result in results.values())
+    return JsonResponse({"ok": ok, "results": results}, json_dumps_params={"ensure_ascii": False})
+
+
+def _test_model_config_part(config: dict[str, Any], part: str):
+    is_vision = part == "vision"
+    model = (
+        config.get("vision_model")
+        if is_vision
+        else config.get("text_model")
+    ) or _default_model_name(is_vision)
+    endpoint = (
+        config.get("vision_endpoint")
+        if is_vision
+        else config.get("text_endpoint")
+    ) or os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    api_key = (
+        (config.get("vision_api_key") or config.get("text_api_key"))
+        if is_vision
+        else config.get("text_api_key")
+    ) or os.getenv("DASHSCOPE_API_KEY") or "sk-dummy"
+
+    try:
+        client = OpenAI(api_key=api_key, base_url=endpoint, timeout=MODEL_TEST_TIMEOUT_SECONDS)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "Return OK."}],
+            temperature=0,
+            max_tokens=MODEL_TEST_MAX_TOKENS,
+        )
+        content = response.choices[0].message.content if response.choices else ""
+        return {
+            "ok": True,
+            "model": model,
+            "endpoint": endpoint,
+            "message": content.strip() or "连接正常",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "model": model,
+            "endpoint": endpoint,
+            "message": _sanitize_model_test_error(str(exc), config),
+        }
+
+
+def _default_model_name(is_vision: bool) -> str:
+    if is_vision:
+        return os.getenv("QWEN_VL_MODEL") or os.getenv("VL_MODEL") or "qwen3.5-omni-plus"
+    return os.getenv("LLM_MODEL") or "qwen-plus"
+
+
+def _sanitize_model_test_error(message: str, config: dict[str, Any]) -> str:
+    sanitized = message or "连接测试失败"
+    for key in ("text_api_key", "vision_api_key"):
+        secret = str(config.get(key) or "").strip()
+        if secret:
+            sanitized = sanitized.replace(secret, "******")
+    return sanitized[:500]
 
 
 @csrf_exempt
@@ -227,6 +355,7 @@ def _stream_pipeline_events(
     top_k: int,
     image_paths: list[Path] | None = None,
     sensor_data: dict[str, Any] | None = None,
+    model_config: dict[str, Any] | None = None,
 ):
     queue: Queue[Any] = Queue()
     finished = object()
@@ -248,6 +377,7 @@ def _stream_pipeline_events(
                 stream=True,
                 image_paths=image_path_texts,
                 sensor_data=sensor_data,
+                model_config=model_config,
             )
             if not image_path_texts:
                 queue.put(("status", {"message": "正在生成辨识报告..."}))

@@ -6,9 +6,12 @@ import argparse
 import logging
 import os
 import sys
+from contextlib import contextmanager
+from threading import RLock
 from typing import Any
 
 from dotenv import load_dotenv
+from openai import OpenAI
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PARENT_DIR = os.path.join(BASE_DIR, "..")
@@ -84,6 +87,7 @@ class VentilationRAGPipeline:
         self.template_engine = None
         self.vision_extractor = None
         self.concept_retriever = None
+        self._model_override_lock = RLock()
         self.connection_manager = ConnectionManager.get_instance(self.cfg)
 
     def initialize(self) -> None:
@@ -180,6 +184,59 @@ class VentilationRAGPipeline:
         logger.info("=" * 60)
 
     def query(
+        self,
+        question: str,
+        top_k: int = 5,
+        stream: bool = False,
+        image_path: str | None = None,
+        image_paths: list[str] | None = None,
+        sensor_data: dict[str, Any] | None = None,
+        model_config: dict[str, Any] | None = None,
+    ):
+        if stream:
+            return self._query_stream_with_model_config(
+                question=question,
+                top_k=top_k,
+                image_path=image_path,
+                image_paths=image_paths,
+                sensor_data=sensor_data,
+                model_config=model_config,
+            )
+        with self._temporary_model_config(model_config):
+            return self._query_impl(
+                question=question,
+                top_k=top_k,
+                stream=stream,
+                image_path=image_path,
+                image_paths=image_paths,
+                sensor_data=sensor_data,
+            )
+
+    def _query_stream_with_model_config(
+        self,
+        question: str,
+        top_k: int = 5,
+        image_path: str | None = None,
+        image_paths: list[str] | None = None,
+        sensor_data: dict[str, Any] | None = None,
+        model_config: dict[str, Any] | None = None,
+    ):
+        with self._temporary_model_config(model_config):
+            chunks = self._query_impl(
+                question=question,
+                top_k=top_k,
+                stream=True,
+                image_path=image_path,
+                image_paths=image_paths,
+                sensor_data=sensor_data,
+            )
+            if isinstance(chunks, str):
+                yield chunks
+                return
+            for chunk in chunks:
+                yield chunk
+
+    def _query_impl(
         self,
         question: str,
         top_k: int = 5,
@@ -683,6 +740,118 @@ class VentilationRAGPipeline:
             "source": "csv" if sensor_data.get("source") == "csv" else "manual",
             "rawCsv": str(sensor_data.get("rawCsv") or "") if sensor_data.get("source") == "csv" else "",
         }
+
+    @contextmanager
+    def _temporary_model_config(self, model_config: dict[str, Any] | None):
+        config = self._normalize_model_config(model_config)
+        with self._model_override_lock:
+            if not config:
+                yield
+                return
+
+            text_client = self._build_openai_client(
+                api_key=config.get("text_api_key") or os.getenv("DASHSCOPE_API_KEY") or "sk-dummy",
+                base_url=config.get("text_endpoint") or os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+            )
+            vision_client = self._build_openai_client(
+                api_key=config.get("vision_api_key") or config.get("text_api_key") or os.getenv("DASHSCOPE_API_KEY") or "sk-dummy",
+                base_url=config.get("vision_endpoint") or config.get("text_endpoint") or os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+            )
+            text_model = config.get("text_model") or self.cfg.llm_model
+            vision_model = config.get("vision_model") or self.cfg.vl_model
+
+            original = self._snapshot_model_state()
+            try:
+                self.cfg.llm_model = text_model
+                self.cfg.vl_model = vision_model
+                self._apply_text_client(text_client, text_model)
+                self._apply_vision_client(vision_client, vision_model)
+                yield
+            finally:
+                self._restore_model_state(original)
+
+    def _normalize_model_config(self, model_config: dict[str, Any] | None) -> dict[str, str] | None:
+        if not isinstance(model_config, dict):
+            return None
+
+        def clean(*keys: str, max_length: int = 300) -> str:
+            for key in keys:
+                value = str(model_config.get(key) or "").strip()
+                if value:
+                    return value[:max_length]
+            return ""
+
+        text_model = clean("text_model", "textModel", max_length=120)
+        vision_model = clean("vision_model", "visionModel", max_length=120)
+        text_endpoint = clean("text_endpoint", "textEndpoint")
+        vision_endpoint = clean("vision_endpoint", "visionEndpoint")
+        text_api_key = clean("text_api_key", "textApiKey", max_length=500)
+        vision_api_key = clean("vision_api_key", "visionApiKey", max_length=500)
+        if not any([text_model, vision_model, text_endpoint, vision_endpoint, text_api_key, vision_api_key]):
+            return None
+        return {
+            "text_model": text_model,
+            "vision_model": vision_model,
+            "text_endpoint": text_endpoint,
+            "vision_endpoint": vision_endpoint,
+            "text_api_key": text_api_key,
+            "vision_api_key": vision_api_key,
+        }
+
+    def _build_openai_client(self, api_key: str, base_url: str):
+        return OpenAI(api_key=api_key or "sk-dummy", base_url=base_url)
+
+    def _snapshot_model_state(self) -> dict[str, Any]:
+        return {
+            "cfg_llm_model": self.cfg.llm_model,
+            "cfg_vl_model": self.cfg.vl_model,
+            "generator_client": getattr(self.generator, "client", None),
+            "generator_model_name": getattr(self.generator, "model_name", None),
+            "router_client": getattr(self.router, "llm_client", None),
+            "hybrid_client": getattr(self.hybrid_ret, "llm_client", None),
+            "hybrid_graph_indexing_client": getattr(getattr(self.hybrid_ret, "graph_indexing", None), "llm_client", None),
+            "graph_client": getattr(self.graph_ret, "llm_client", None),
+            "vision_client": getattr(self.vision_extractor, "client", None),
+            "vision_model_name": getattr(self.vision_extractor, "model_name", None),
+        }
+
+    def _apply_text_client(self, client: Any, model_name: str) -> None:
+        if self.generator:
+            self.generator.client = client
+            self.generator.model_name = model_name
+        if self.router:
+            self.router.llm_client = client
+        if self.hybrid_ret:
+            self.hybrid_ret.llm_client = client
+            graph_indexing = getattr(self.hybrid_ret, "graph_indexing", None)
+            if graph_indexing:
+                graph_indexing.llm_client = client
+        if self.graph_ret:
+            self.graph_ret.llm_client = client
+
+    def _apply_vision_client(self, client: Any, model_name: str) -> None:
+        if self.vision_extractor:
+            self.vision_extractor.client = client
+            self.vision_extractor.model_name = model_name
+
+    def _restore_model_state(self, state: dict[str, Any]) -> None:
+        self.cfg.llm_model = state["cfg_llm_model"]
+        self.cfg.vl_model = state["cfg_vl_model"]
+        if self.generator:
+            self.generator.client = state["generator_client"]
+            self.generator.model_name = state["generator_model_name"]
+        if self.router:
+            self.router.llm_client = state["router_client"]
+        if self.hybrid_ret:
+            self.hybrid_ret.llm_client = state["hybrid_client"]
+            graph_indexing = getattr(self.hybrid_ret, "graph_indexing", None)
+            if graph_indexing:
+                graph_indexing.llm_client = state["hybrid_graph_indexing_client"]
+        if self.graph_ret:
+            self.graph_ret.llm_client = state["graph_client"]
+        if self.vision_extractor:
+            self.vision_extractor.client = state["vision_client"]
+            self.vision_extractor.model_name = state["vision_model_name"]
 
     def _merge_docs(self, primary_docs, fallback_docs):
         merged = []

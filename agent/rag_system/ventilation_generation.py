@@ -19,18 +19,26 @@ class VentilationGenerationModule:
 
     SYSTEM_ROLE = "矿井通风安全专家"
 
-    def __init__(self, model_name: str = "qwen-plus", temperature: float = 0.1, max_tokens: int = 2048):
+    def __init__(
+        self,
+        model_name: str = "qwen-plus",
+        temperature: float = 0.1,
+        max_tokens: int = 2048,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        client: OpenAI | None = None,
+    ):
         self.model_name = model_name
         self.temperature = temperature
         self.max_tokens = max_tokens
 
-        api_key = os.getenv("DASHSCOPE_API_KEY")
-        if not api_key:
+        resolved_api_key = api_key or os.getenv("DASHSCOPE_API_KEY")
+        if not resolved_api_key:
             logger.warning("环境变量 DASHSCOPE_API_KEY 未设置，生成功能可能无法使用")
 
-        self.client = OpenAI(
-            api_key=api_key or "sk-dummy",
-            base_url=os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        self.client = client or OpenAI(
+            api_key=resolved_api_key or "sk-dummy",
+            base_url=base_url or os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
         )
         logger.info("通风生成模块初始化成功，模型: %s", model_name)
 

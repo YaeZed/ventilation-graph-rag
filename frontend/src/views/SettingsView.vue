@@ -239,6 +239,124 @@
       <p v-if="chat.teamError" class="settings-error">{{ chat.teamError }}</p>
     </div>
 
+    <div class="settings-panel model-config-panel">
+      <div class="settings-section-header">
+        <div>
+          <strong>模型服务</strong>
+          <p>{{ modelConfigStatusCopy }}</p>
+        </div>
+        <SettingsSelect
+          :model-value="chat.settings.modelConfig.provider"
+          class="model-provider-select"
+          aria-label="选择模型服务商"
+          :options="modelProviderOptions"
+          @change="applyModelPreset"
+        />
+      </div>
+
+      <div class="model-config-group">
+        <div class="model-config-group-title">
+          <strong>文本生成模型</strong>
+        </div>
+        <label>
+          <span>模型名称</span>
+          <input
+            :value="chat.settings.modelConfig.textModel"
+            type="text"
+            maxlength="120"
+            @change="updateModelField('textModel', $event)"
+          />
+        </label>
+        <label>
+          <span>API Endpoint</span>
+          <input
+            :value="chat.settings.modelConfig.textEndpoint"
+            type="text"
+            maxlength="300"
+            @change="updateModelField('textEndpoint', $event)"
+          />
+        </label>
+        <label>
+          <span>API Key</span>
+          <input
+            :value="chat.settings.modelConfig.textApiKey"
+            type="password"
+            maxlength="500"
+            autocomplete="off"
+            placeholder="后端默认密钥"
+            @change="updateModelField('textApiKey', $event)"
+          />
+        </label>
+      </div>
+
+      <div class="model-config-group">
+        <div class="model-config-group-title">
+          <strong>视觉识别模型</strong>
+        </div>
+        <label>
+          <span>模型名称</span>
+          <input
+            :value="chat.settings.modelConfig.visionModel"
+            type="text"
+            maxlength="120"
+            @change="updateModelField('visionModel', $event)"
+          />
+        </label>
+        <label>
+          <span>API Endpoint</span>
+          <input
+            :value="chat.settings.modelConfig.visionEndpoint"
+            type="text"
+            maxlength="300"
+            @change="updateModelField('visionEndpoint', $event)"
+          />
+        </label>
+        <label>
+          <span>API Key</span>
+          <input
+            :value="chat.settings.modelConfig.visionApiKey"
+            type="password"
+            maxlength="500"
+            autocomplete="off"
+            placeholder="同文本密钥"
+            @change="updateModelField('visionApiKey', $event)"
+          />
+        </label>
+      </div>
+
+      <div class="model-config-actions">
+        <button
+          type="button"
+          class="auth-inline-button"
+          :disabled="chat.modelTestStatus === 'testing'"
+          @click="chat.testCurrentModelConfig"
+        >
+          {{ chat.modelTestStatus === 'testing' ? '测试中...' : '测试连接' }}
+        </button>
+        <button type="button" class="ghost-button" @click="chat.resetModelConfig">
+          恢复默认
+        </button>
+      </div>
+
+      <div
+        v-if="chat.modelTestStatus !== 'idle'"
+        class="model-test-result"
+        :class="{
+          success: chat.modelTestStatus === 'success',
+          error: chat.modelTestStatus === 'error',
+        }"
+      >
+        <strong>{{ modelTestStatusCopy }}</strong>
+        <div v-if="chat.modelTestResult" class="model-test-grid">
+          <span>文本</span>
+          <p>{{ modelTestPartCopy(chat.modelTestResult.results.text) }}</p>
+          <span>视觉</span>
+          <p>{{ modelTestPartCopy(chat.modelTestResult.results.vision) }}</p>
+        </div>
+        <p v-else-if="chat.modelTestError">{{ chat.modelTestError }}</p>
+      </div>
+    </div>
+
     <div class="settings-panel">
       <label>
         <span>昵称</span>
@@ -287,7 +405,9 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import SettingsSelect from '@/components/SettingsSelect.vue'
+import type { ModelTestPart } from '@/api/chat'
 import { useChatStore } from '@/stores/chat'
+import { MODEL_PRESETS, type ModelConfig, type ModelProvider } from '@/types/modelConfig'
 
 type SettingsSelectOption = {
   value: string
@@ -345,11 +465,31 @@ const newMemberRoleOptions = computed<SettingsSelectOption[]>(() => [
   { value: 'member', label: roleLabel('member') },
   { value: 'admin', label: roleLabel('admin') },
 ])
+const modelProviderOptions = computed<SettingsSelectOption[]>(() =>
+  Object.values(MODEL_PRESETS).map((preset) => ({
+    value: preset.provider,
+    label: preset.name,
+  })),
+)
 const teamStatusCopy = computed(() => {
   if (chat.teamStatus === 'loading') return '正在同步团队信息'
   if (!chat.teams.length) return '暂无团队'
   return `${chat.teams.length} 个团队`
 })
+
+const modelConfigStatusCopy = computed(() => {
+  const providerName = MODEL_PRESETS[chat.settings.modelConfig.provider]?.name || '自定义'
+  return `${providerName} · ${chat.settings.modelConfig.textModel || '未设置'} / ${chat.settings.modelConfig.visionModel || '未设置'}`
+})
+
+const modelTestStatusCopy = computed(() => {
+  if (chat.modelTestStatus === 'testing') return '正在测试模型连接'
+  if (chat.modelTestStatus === 'success') return '文本和视觉模型均可用'
+  return '模型连接需要处理'
+})
+
+const modelTestPartCopy = (part: ModelTestPart) =>
+  `${part.ok ? '通过' : '失败'} · ${part.model} · ${part.message}`
 
 const securityStatusCopy = computed(() => {
   if (chat.securityStatus === 'loading') return '正在读取最近账号事件'
@@ -475,6 +615,15 @@ const saveProfile = () => {
     nickname: nickname.value,
     avatarText: nickname.value.slice(0, 1),
   })
+}
+
+const applyModelPreset = (provider: string) => {
+  chat.applyModelPreset(provider as ModelProvider)
+}
+
+const updateModelField = (field: keyof ModelConfig, event: Event) => {
+  const target = event.target as HTMLInputElement
+  chat.updateModelConfig({ [field]: target.value } as Partial<ModelConfig>)
 }
 
 const syncNow = () => {

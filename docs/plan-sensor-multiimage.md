@@ -9,7 +9,7 @@ Completed on 2026-06-01.
 - RAG: `VentilationRAGPipeline.query()` now accepts `image_paths` and `sensor_data`; single-image, multi-image, sensor-only, and fused flows route explicitly.
 - Vision: `VentilationVisionExtractor.extract_multi()` performs per-image observation, merged concept retrieval, and multi-image joint analysis with per-image observations and cross-image findings.
 - Generation: `_build_multimodal_prompt()` and `generate_multimodal_answer(_stream)` produce image/data/regulation cross-validation reports.
-- UI polish: sensor type selection reuses `SettingsSelect`; the multi-image add button stays square after thumbnails render; sent user-message images render immediately, can be opened in an in-page centered preview, and survive refresh through compressed local previews plus backend attachment retry.
+- UI polish: sensor type selection reuses `SettingsSelect`; the multi-image add button stays square after thumbnails render; sent user-message images render immediately, can be opened in an in-page centered preview, stay within the preview frame for long images, support multi-image arrow/keyboard navigation, and survive refresh through compressed local previews plus backend attachment retry.
 - Validation: Python compile check, `web_backend/manage.py check`, Django chat multimodal fake-pipeline smoke, `vue-tsc --build`, and `vite build` passed.
 
 ## Context

@@ -1,4 +1,6 @@
 import type { SensorData } from '@/types/multimodal'
+import { modelConfigForRequest, type ModelConfig } from '@/types/modelConfig'
+import { friendlyHttpError } from '@/api/errors'
 
 export type ChatResponse = {
   ok: boolean
@@ -10,6 +12,21 @@ export type StreamStepEvent = {
   step: string
   message: string
   data?: Record<string, unknown>
+}
+
+export type ModelTestPart = {
+  ok: boolean
+  model: string
+  endpoint: string
+  message: string
+}
+
+export type ModelTestResult = {
+  ok: boolean
+  results: {
+    text: ModelTestPart
+    vision: ModelTestPart
+  }
 }
 
 export type StreamHandlers = {
@@ -24,18 +41,26 @@ const API_BASE = import.meta.env.VITE_API_BASE || ''
 const REQUEST_TIMEOUT_MS = 120_000
 const IMAGE_REQUEST_TIMEOUT_MS = 600_000
 const STREAM_TIMEOUT_MS = 1_800_000
+const MODEL_TEST_TIMEOUT_MS = 60_000
 
 export async function sendTextMessage(
   question: string,
   topK = 5,
   sensorData?: SensorData | null,
+  modelConfig?: ModelConfig | null,
 ): Promise<string> {
   const controller = createTimeoutController(REQUEST_TIMEOUT_MS)
   try {
+    const modelPayload = modelConfig ? modelConfigForRequest(modelConfig) : undefined
     const response = await fetch(`${API_BASE}/api/chat/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question, top_k: topK, sensor_data: sensorData || undefined }),
+      body: JSON.stringify({
+        question,
+        top_k: topK,
+        sensor_data: sensorData || undefined,
+        model_config: modelPayload,
+      }),
       signal: controller.signal,
     })
     return parseAnswer(response)
@@ -51,6 +76,7 @@ export async function sendImageMessage(
   images: File | File[],
   topK = 5,
   sensorData?: SensorData | null,
+  modelConfig?: ModelConfig | null,
 ): Promise<string> {
   const controller = createTimeoutController(IMAGE_REQUEST_TIMEOUT_MS)
   const formData = new FormData()
@@ -58,6 +84,7 @@ export async function sendImageMessage(
   formData.append('question', question)
   formData.append('top_k', String(topK))
   if (sensorData) formData.append('sensor_data', JSON.stringify(sensorData))
+  if (modelConfig) formData.append('model_config', JSON.stringify(modelConfigForRequest(modelConfig)))
   imageFiles.forEach((image) => {
     formData.append('images', image)
   })
@@ -83,6 +110,7 @@ export async function streamMessage(
   handlers: StreamHandlers,
   topK = 5,
   sensorData?: SensorData | null,
+  modelConfig?: ModelConfig | null,
 ): Promise<void> {
   const controller = createTimeoutController(STREAM_TIMEOUT_MS)
   const init: RequestInit = { method: 'POST', signal: controller.signal }
@@ -93,6 +121,7 @@ export async function streamMessage(
     formData.append('question', question)
     formData.append('top_k', String(topK))
     if (sensorData) formData.append('sensor_data', JSON.stringify(sensorData))
+    if (modelConfig) formData.append('model_config', JSON.stringify(modelConfigForRequest(modelConfig)))
     imageFiles.forEach((image) => {
       formData.append('images', image)
     })
@@ -100,13 +129,18 @@ export async function streamMessage(
     init.body = formData
   } else {
     init.headers = { 'Content-Type': 'application/json' }
-    init.body = JSON.stringify({ question, top_k: topK, sensor_data: sensorData || undefined })
+    init.body = JSON.stringify({
+      question,
+      top_k: topK,
+      sensor_data: sensorData || undefined,
+      model_config: modelConfig ? modelConfigForRequest(modelConfig) : undefined,
+    })
   }
 
   try {
     const response = await fetch(`${API_BASE}/api/chat/stream/`, init)
     if (!response.ok || !response.body) {
-      throw new Error(await response.text())
+      throw new Error(friendlyHttpError(response, await response.text()))
     }
 
     const reader = response.body.getReader()
@@ -134,6 +168,33 @@ export async function streamMessage(
   }
 }
 
+export async function testModelConfig(modelConfig: ModelConfig): Promise<ModelTestResult> {
+  const controller = createTimeoutController(MODEL_TEST_TIMEOUT_MS)
+  try {
+    const response = await fetch(`${API_BASE}/api/chat/model/test/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model_config: modelConfigForRequest(modelConfig) }),
+      signal: controller.signal,
+    })
+    const rawText = await response.text()
+    let payload: ModelTestResult & { error?: string }
+    try {
+      payload = JSON.parse(rawText) as ModelTestResult & { error?: string }
+    } catch {
+      throw new Error(friendlyHttpError(response, rawText))
+    }
+    if (!response.ok) {
+      throw new Error(payload.error || friendlyHttpError(response, rawText))
+    }
+    return payload
+  } catch (exc) {
+    throw new Error(toFriendlyRequestError(exc, MODEL_TEST_TIMEOUT_MS))
+  } finally {
+    controller.clear()
+  }
+}
+
 function normalizeImages(images: File | File[] | null): File[] {
   if (!images) return []
   return Array.isArray(images) ? images.filter(Boolean) : [images]
@@ -146,7 +207,7 @@ async function parseAnswer(response: Response): Promise<string> {
     payload = JSON.parse(rawText) as ChatResponse
   } catch {
     if (!response.ok) {
-      throw new Error(rawText || `HTTP ${response.status}`)
+      throw new Error(friendlyHttpError(response, rawText))
     }
     throw new Error('后端返回了无法解析的响应')
   }

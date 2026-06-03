@@ -30,7 +30,16 @@
   "settings": {
     "useStream": true,
     "autoExpandSteps": true,
-    "temperature": 0.2
+    "temperature": 0.2,
+    "modelConfig": {
+      "provider": "dashscope",
+      "textModel": "qwen-plus",
+      "textEndpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "textApiKey": "",
+      "visionModel": "qwen3.5-omni-plus",
+      "visionEndpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "visionApiKey": ""
+    }
   }
 }
 ```
@@ -329,6 +338,22 @@
 
 `sensor_data` 可选；提供后，生成 prompt 会增加“传感器实测数据”和“交叉验证分析”，并把参数名称、数值、地点用于规程阈值检索。
 
+`model_config` / `modelConfig` 可选；提供后仅覆盖当前请求的 OpenAI-compatible 模型配置，不会重建 Neo4j/Milvus 索引。字段如下：
+
+```json
+{
+  "provider": "dashscope",
+  "textModel": "qwen-plus",
+  "textEndpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  "textApiKey": "sk-...",
+  "visionModel": "qwen3.5-omni-plus",
+  "visionEndpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  "visionApiKey": "sk-..."
+}
+```
+
+`provider` 支持 `dashscope`、`openai`、`ollama`、`custom`。文本模型配置用于路由分析、GraphRAG/Hybrid LLM 辅助检索和最终生成；视觉模型配置用于单图/多图观察与分析。当前开发态未提供 API key 时后端回退到 `.env` 中的 `DASHSCOPE_API_KEY`；公开部署前必须改成 BYOK 或明确的租户密钥策略，避免普通用户消耗维护者密钥。
+
 响应：
 
 ```json
@@ -360,6 +385,7 @@
 | `question` / `message` | 否 | 用户补充问题；默认“请判断图片中的通风安全隐患” |
 | `top_k` | 否 | 检索数量，默认 5 |
 | `sensor_data` / `sensorData` | 否 | JSON 字符串，结构同 `/api/chat/` 的 `sensor_data` |
+| `model_config` / `modelConfig` | 否 | JSON 字符串，结构同 `/api/chat/` 的 `model_config` |
 
 响应同 `/api/chat/`。
 
@@ -384,7 +410,7 @@ JSON 请求：
 }
 ```
 
-multipart 请求字段同 `/api/chat/upload/`，可同时携带 `images` 与 `sensor_data`。
+multipart 请求字段同 `/api/chat/upload/`，可同时携带 `images`、`sensor_data` 与 `model_config`。
 
 SSE 响应类型：
 
@@ -433,6 +459,50 @@ data: {"step":"vision_observe","message":"正在初步观察图片...","data":{}
 | `sensor_compare` / `sensor_compare_done` | 接入传感器数据并准备规程阈值比对 |
 | `cypher_match` / `cypher_match_done` | 匹配规程 Cypher 模板和兜底检索 |
 | `generating` | 生成 Markdown 辨识报告 |
+
+## POST `/api/chat/model/test/`
+
+测试 `/settings` 当前模型服务配置是否能访问 OpenAI-compatible `chat.completions`。该接口只做 text/vision 模型连通性探测，不触发 RAG 检索、Neo4j/Milvus 索引或图片分析。
+
+请求：
+
+```json
+{
+  "model_config": {
+    "provider": "openai",
+    "textModel": "gpt-4o",
+    "textEndpoint": "https://api.openai.com/v1",
+    "textApiKey": "sk-...",
+    "visionModel": "gpt-4o",
+    "visionEndpoint": "https://api.openai.com/v1",
+    "visionApiKey": "sk-..."
+  }
+}
+```
+
+响应：
+
+```json
+{
+  "ok": false,
+  "results": {
+    "text": {
+      "ok": true,
+      "model": "gpt-4o",
+      "endpoint": "https://api.openai.com/v1",
+      "message": "OK"
+    },
+    "vision": {
+      "ok": false,
+      "model": "gpt-4o",
+      "endpoint": "https://api.openai.com/v1",
+      "message": "连接测试失败"
+    }
+  }
+}
+```
+
+提交的 API key 如果出现在异常文本中，会在返回前替换为 `******`。当前登录用户的模型配置会随 `settings.modelConfig` 同步；生产环境应先选择 local-only key、加密服务端保存或租户密钥策略。
 
 ## GET `/api/chat/vision/scenes/`
 

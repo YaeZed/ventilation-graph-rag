@@ -35,6 +35,15 @@ DEFAULT_SETTINGS = {
     "useStream": True,
     "autoExpandSteps": True,
     "temperature": 0.2,
+    "modelConfig": {
+        "provider": "dashscope",
+        "textModel": "qwen-plus",
+        "textEndpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "textApiKey": "",
+        "visionModel": "qwen3.5-omni-plus",
+        "visionEndpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "visionApiKey": "",
+    },
 }
 MAX_ATTACHMENT_SIZE = 8 * 1024 * 1024
 HAZARD_TONES = {
@@ -167,6 +176,40 @@ def _profile_for(user):
     return profile
 
 
+def _normalize_model_config(value: Any):
+    default = DEFAULT_SETTINGS["modelConfig"]
+    if not isinstance(value, dict):
+        return default.copy()
+    provider = str(value.get("provider") or default["provider"]).strip().lower()
+    if provider not in {"dashscope", "openai", "ollama", "custom"}:
+        provider = default["provider"]
+    return {
+        "provider": provider,
+        "textModel": _clean_text(value.get("textModel"), default["textModel"], 120),
+        "textEndpoint": _clean_text(value.get("textEndpoint"), default["textEndpoint"], 300),
+        "textApiKey": _clean_text(value.get("textApiKey"), "", 500),
+        "visionModel": _clean_text(value.get("visionModel"), default["visionModel"], 120),
+        "visionEndpoint": _clean_text(value.get("visionEndpoint"), default["visionEndpoint"], 300),
+        "visionApiKey": _clean_text(value.get("visionApiKey"), "", 500),
+    }
+
+
+def _normalize_user_settings(value: Any):
+    source = value if isinstance(value, dict) else {}
+    temperature = source.get("temperature", DEFAULT_SETTINGS["temperature"])
+    try:
+        temperature = float(temperature)
+    except (TypeError, ValueError):
+        temperature = DEFAULT_SETTINGS["temperature"]
+    temperature = min(1, max(0, temperature))
+    return {
+        "useStream": bool(source.get("useStream", DEFAULT_SETTINGS["useStream"])),
+        "autoExpandSteps": bool(source.get("autoExpandSteps", DEFAULT_SETTINGS["autoExpandSteps"])),
+        "temperature": temperature,
+        "modelConfig": _normalize_model_config(source.get("modelConfig")),
+    }
+
+
 def _serialize_user(user):
     profile = _profile_for(user)
     nickname = profile.nickname or user.first_name or user.username
@@ -175,7 +218,7 @@ def _serialize_user(user):
         "username": user.username,
         "nickname": nickname,
         "avatarText": profile.avatar_text or nickname[:2] or "用",
-        "settings": {**DEFAULT_SETTINGS, **(profile.settings or {})},
+        "settings": _normalize_user_settings(profile.settings),
     }
 
 
@@ -625,7 +668,7 @@ def register_view(request):
         user=user,
         nickname=nickname,
         avatar_text=(payload.get("avatarText") or nickname[:2] or username[:2])[:4],
-        settings={**DEFAULT_SETTINGS, **(payload.get("settings") or {})},
+        settings=_normalize_user_settings(payload.get("settings")),
     )
     login(request, user)
     _record_security_event(request, SecurityEvent.EVENT_REGISTER, user=user, username=username)
@@ -733,7 +776,7 @@ def profile_view(request):
     if avatar_text is not None:
         profile.avatar_text = _clean_text(avatar_text, profile.nickname[:2] or "用", 4)
     if isinstance(settings, dict):
-        profile.settings = {**DEFAULT_SETTINGS, **settings}
+        profile.settings = _normalize_user_settings(settings)
     profile.save()
 
     return JsonResponse({"ok": True, "user": _serialize_user(request.user)}, json_dumps_params={"ensure_ascii": False})

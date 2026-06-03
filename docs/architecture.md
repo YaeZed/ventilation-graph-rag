@@ -71,7 +71,7 @@ flowchart LR
 
 ## Web 层
 
-Django 不在 app 启动时立即加载 RAG，而是通过 `web_backend/chat/pipeline_service.py` 懒加载单例 `VentilationRAGPipeline`。第一次问答会触发初始化，后续请求复用同一 pipeline。
+Django 不在 app 启动时立即加载 RAG，而是通过 `web_backend/chat/pipeline_service.py` 懒加载单例 `VentilationRAGPipeline`。第一次问答会触发初始化，后续请求复用同一 pipeline。`/settings` 中的模型服务配置不会重建 pipeline 或索引；前端在 `/api/chat/`、`/api/chat/upload/`、`/api/chat/stream/` 请求中携带 `model_config`，后端在当前请求范围内临时覆盖 OpenAI-compatible text/VL client 和模型名，执行完恢复默认对象。开发态缺少用户 key 时可回退 `.env` 默认模型 key；公开部署必须改成 BYOK 或受控租户密钥，不能让普通用户默认消耗维护者 key。为避免并发请求互相污染，模型覆盖上下文使用锁保护；Neo4j、Milvus、文档 chunk 和检索索引仍然复用全局实例。
 
 前端用 Vite 代理 `/api` 到 `127.0.0.1:8000`。助手消息使用 `markdown-it` 渲染 Markdown，并关闭原始 HTML。
 
@@ -93,7 +93,7 @@ Django 不在 app 启动时立即加载 RAG，而是通过 `web_backend/chat/pip
 
 后端用户模块位于 `web_backend/users/`，使用 Django 内置 `User` 和 session 登录。`UserProfile` 保存昵称、头像文字和偏好设置，`Team` 和 `TeamMembership` 提供团队空间与 `owner/admin/member` 三档角色。`ConversationRecord` 以 `(user, client_id)` 唯一约束保存前端会话快照、归档状态、元数据和消息 JSON，并通过可空 `team` 外键表示个人空间或团队空间。`ConversationAttachment` 保存登录用户上传的图片附件，开发期文件落在 `web_backend/media/conversation_attachments/`。前端本地缓存可在消息 `images[]` 中保留压缩 data URL 作为刷新兜底；同步到后端的会话快照会剥离 data URL，只保留附件 URL/元数据，附件上传失败时会用压缩预览重试。P5 起用户模块启用 Django CSRF、密码校验器、登录失败限流、session cookie 安全配置和 `SecurityEvent` 账号安全事件记录；生产部署仍需要正式数据库、反向代理、静态/media 托管和跨域策略评审。
 
-`/settings` 是账号和团队管理入口。登录用户可创建团队、按用户名添加成员、调整 `admin/member` 角色、移除成员。会话归属不在设置页处理，而是在每个对话的三点菜单中通过“归属团队”子菜单显式选择。P4+ 不自动共享历史个人会话，避免加入团队后暴露旧记录。
+`/settings` 是账号、团队和模型服务配置入口。登录用户可创建团队、按用户名添加成员、调整 `admin/member` 角色、移除成员；访客和登录用户都可选择 DashScope、OpenAI、Ollama 或自定义 OpenAI-compatible 模型配置。登录用户的模型配置目前随 `UserProfile.settings.modelConfig` 同步；生产部署前需要决定 API key 是否 local-only、服务端加密保存或由管理员配置租户 key。会话归属不在设置页处理，而是在每个对话的三点菜单中通过“归属团队”子菜单显式选择。P4+ 不自动共享历史个人会话，避免加入团队后暴露旧记录。
 
 团队会话浏览通过 `GET /api/users/teams/<teamId>/conversations/` 提供。前端把这些会话保存在独立的 `teamConversations` 状态中，侧边栏在“最近对话”下方显示可展开/收起的“团队对话”。打开别人创建的团队会话时进入只读浏览，不参与当前用户个人会话同步。
 
@@ -101,6 +101,6 @@ Django 不在 app 启动时立即加载 RAG，而是通过 `web_backend/chat/pip
 
 侧边栏由 `Sidebar.vue`、`ConversationList.vue`、`ConversationItem.vue`、`UserMiniCard.vue` 等组件组成。它采用浅色 Gemini 风格：收缩态为图标轨，展开态包含新建对话、搜索、统计入口、未归档对话列表、可展开/收起的团队对话区、归档区、偏好设置和用户头像。单个会话的三点菜单支持归属团队、分享、归档、重命名、导出 PDF 和删除；团队归属子菜单通过 Teleport 固定在主菜单右侧，避免被侧边栏滚动容器裁剪。
 
-设置页和统计页的下拉控件统一使用 `frontend/src/components/SettingsSelect.vue`。不要在这些位置回退到原生 `select`，因为浏览器/系统默认 option 样式无法稳定控制，且容易被页面头部按钮样式污染。
+设置页和统计页的下拉控件统一使用 `frontend/src/components/SettingsSelect.vue`。模型服务商、团队选择、成员角色和统计范围都应复用该组件。不要在这些位置回退到原生 `select`，因为浏览器/系统默认 option 样式无法稳定控制，且容易被页面头部按钮样式污染。
 
 导出能力全部在浏览器侧完成：单会话 PDF 通过新窗口打印生成，助手 Markdown 会先用 `markdown-it` 渲染为排版后的 HTML；全量记录通过 JSON blob 下载。未登录游客仍使用压缩 data URL 保存图片预览；登录用户上传图片时会先写入后端附件，消息和会话快照只保存 media URL 与附件元数据，从而减少 `localStorage` 和后端会话 JSON 体积。附件上传失败时前端会降级为本地 data URL，保证当次辨识不被阻断。

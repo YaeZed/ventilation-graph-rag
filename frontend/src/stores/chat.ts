@@ -1,4 +1,11 @@
-import { sendImageMessage, sendTextMessage, streamMessage, type StreamStepEvent } from '@/api/chat'
+import {
+  sendImageMessage,
+  sendTextMessage,
+  streamMessage,
+  testModelConfig,
+  type ModelTestResult,
+  type StreamStepEvent,
+} from '@/api/chat'
 import {
   addTeamMember,
   assignRemoteConversationTeam,
@@ -30,6 +37,13 @@ import {
 } from '@/api/users'
 import { createSafeMarkdownRenderer } from '@/utils/markdown'
 import type { ChatMessageImage, SensorData } from '@/types/multimodal'
+import {
+  DEFAULT_MODEL_CONFIG,
+  normalizeModelConfig,
+  presetToModelConfig,
+  type ModelConfig,
+  type ModelProvider,
+} from '@/types/modelConfig'
 import { defineStore } from 'pinia'
 import { computed, nextTick, ref, watch } from 'vue'
 
@@ -101,10 +115,12 @@ export type UserSettings = {
   useStream: boolean
   autoExpandSteps: boolean
   temperature: number
+  modelConfig: ModelConfig
 }
 
 export type AuthStatus = 'checking' | 'guest' | 'authenticated'
 export type SyncStatus = 'idle' | 'syncing' | 'synced' | 'error'
+export type ModelTestStatus = 'idle' | 'testing' | 'success' | 'error'
 export type StatsStatus = 'idle' | 'loading' | 'ready' | 'error'
 export type TeamStatus = 'idle' | 'loading' | 'ready' | 'error'
 
@@ -183,6 +199,7 @@ const DEFAULT_SETTINGS: UserSettings = {
   useStream: true,
   autoExpandSteps: true,
   temperature: 0.2,
+  modelConfig: { ...DEFAULT_MODEL_CONFIG },
 }
 
 const printableMarkdown = createSafeMarkdownRenderer()
@@ -215,6 +232,9 @@ export const useChatStore = defineStore('chat', () => {
   const authError = ref('')
   const syncStatus = ref<SyncStatus>('idle')
   const syncError = ref('')
+  const modelTestStatus = ref<ModelTestStatus>('idle')
+  const modelTestResult = ref<ModelTestResult | null>(null)
+  const modelTestError = ref('')
   const statsStatus = ref<StatsStatus>('idle')
   const statsError = ref('')
   const remoteStats = ref<ChatStats | null>(null)
@@ -566,7 +586,7 @@ export const useChatStore = defineStore('chat', () => {
             current.status = 'done'
             updateConversationMeta(conversationId, current)
           },
-        }, 5, cleanSensorData)
+        }, 5, cleanSensorData, settings.value.modelConfig)
         const current = findMessage(conversationId, assistantMessage.id)
         if (current?.status === 'streaming') {
           markActiveStepsDone(current)
@@ -575,8 +595,8 @@ export const useChatStore = defineStore('chat', () => {
         }
       } else {
         const answer = imageFiles.length
-          ? await sendImageMessage(userMessage.content, imageFiles, 5, cleanSensorData)
-          : await sendTextMessage(userMessage.content, 5, cleanSensorData)
+          ? await sendImageMessage(userMessage.content, imageFiles, 5, cleanSensorData, settings.value.modelConfig)
+          : await sendTextMessage(userMessage.content, 5, cleanSensorData, settings.value.modelConfig)
         updateMessage(conversationId, assistantMessage.id, { content: answer, status: 'done' })
         const current = findMessage(conversationId, assistantMessage.id)
         if (current) updateConversationMeta(conversationId, current)
@@ -928,6 +948,44 @@ export const useChatStore = defineStore('chat', () => {
   function updateSettings(updates: Partial<UserSettings>) {
     settings.value = normalizeSettings({ ...settings.value, ...updates })
     void pushRemoteProfile()
+  }
+
+  function applyModelPreset(provider: ModelProvider) {
+    clearModelTestState()
+    updateSettings({ modelConfig: presetToModelConfig(provider, settings.value.modelConfig) })
+  }
+
+  function updateModelConfig(updates: Partial<ModelConfig>) {
+    clearModelTestState()
+    updateSettings({ modelConfig: normalizeModelConfig({ ...settings.value.modelConfig, ...updates }) })
+  }
+
+  function resetModelConfig() {
+    clearModelTestState()
+    updateSettings({ modelConfig: { ...DEFAULT_MODEL_CONFIG } })
+  }
+
+  function clearModelTestState() {
+    modelTestStatus.value = 'idle'
+    modelTestResult.value = null
+    modelTestError.value = ''
+  }
+
+  async function testCurrentModelConfig() {
+    modelTestStatus.value = 'testing'
+    modelTestResult.value = null
+    modelTestError.value = ''
+    try {
+      const result = await testModelConfig(settings.value.modelConfig)
+      modelTestResult.value = result
+      modelTestStatus.value = result.ok ? 'success' : 'error'
+      if (!result.ok) modelTestError.value = summarizeModelTestResult(result)
+      return result.ok
+    } catch (exc) {
+      modelTestStatus.value = 'error'
+      modelTestError.value = exc instanceof Error ? exc.message : String(exc || '连接测试失败')
+      return false
+    }
   }
 
   async function initializeUserSession() {
@@ -1529,6 +1587,9 @@ export const useChatStore = defineStore('chat', () => {
     authError,
     syncStatus,
     syncError,
+    modelTestStatus,
+    modelTestResult,
+    modelTestError,
     statsStatus,
     statsError,
     teams,
@@ -1561,6 +1622,10 @@ export const useChatStore = defineStore('chat', () => {
     searchConversations,
     updateUserProfile,
     updateSettings,
+    applyModelPreset,
+    updateModelConfig,
+    resetModelConfig,
+    testCurrentModelConfig,
     registerAccount,
     loginAccount,
     logoutAccount,
@@ -1699,7 +1764,15 @@ function normalizeSettings(next?: Partial<UserSettings>) {
     useStream: next?.useStream ?? DEFAULT_SETTINGS.useStream,
     autoExpandSteps: next?.autoExpandSteps ?? DEFAULT_SETTINGS.autoExpandSteps,
     temperature: Number.isFinite(temperature) ? Math.min(1, Math.max(0, temperature)) : 0.2,
+    modelConfig: normalizeModelConfig(next?.modelConfig),
   }
+}
+
+function summarizeModelTestResult(result: ModelTestResult) {
+  const failedParts = Object.entries(result.results)
+    .filter(([, part]) => !part.ok)
+    .map(([key, part]) => `${key === 'text' ? '文本' : '视觉'}：${part.message}`)
+  return failedParts.join('；') || '模型连接测试失败'
 }
 
 function sanitizeConversationForStorage(conversation: Conversation, includeImages: boolean): Conversation {

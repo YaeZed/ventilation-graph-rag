@@ -35,7 +35,11 @@
       </div>
     </header>
 
-    <div ref="messagesEl" class="result-area custom-scrollbar" @scroll.passive="rememberActiveScroll">
+    <div
+      ref="messagesEl"
+      class="result-area custom-scrollbar"
+      @scroll.passive="rememberActiveScroll"
+    >
       <Transition name="fade" mode="out-in" @after-enter="restoreActiveScroll">
         <div :key="chat.activeId || 'empty-conversation'" class="conversation-pane">
           <EmptyState
@@ -116,10 +120,7 @@
     </div>
 
     <form class="bottom-bar-container" @submit.prevent="submit">
-      <div
-        v-if="!chat.isViewingTeamConversation && hasDraftContext"
-        class="draft-context-panel"
-      >
+      <div v-if="!chat.isViewingTeamConversation && hasDraftContext" class="draft-context-panel">
         <MultiImageBar
           v-if="activeDraft.images.length"
           :images="activeDraft.images"
@@ -157,7 +158,7 @@
           :disabled="chat.isViewingTeamConversation"
           @click="toggleSensorPanel"
         >
-          <span>数</span>
+          <span>数据</span>
         </button>
         <div v-if="firstDraftImage" class="image-pill">
           <img :src="firstDraftImage.preview" alt="待上传图片" />
@@ -174,7 +175,14 @@
           <span>➤</span>
         </button>
       </div>
-      <input ref="fileInput" hidden multiple type="file" accept="image/*" @change="handleFileChange" />
+      <input
+        ref="fileInput"
+        hidden
+        multiple
+        type="file"
+        accept="image/*"
+        @change="handleFileChange"
+      />
     </form>
 
     <Teleport to="body">
@@ -283,15 +291,15 @@ const inputPlaceholder = computed(() =>
   chat.isViewingTeamConversation
     ? '团队对话为只读浏览，继续辨识请回到自己的对话或新建对话'
     : activeDraft.value.images.length || activeDraft.value.sensorData
-    ? '补充现场描述，例如：检查掘进工作面整体通风状况'
-    : '输入检查项，或上传图片后补充现场描述',
+      ? '补充现场描述，例如：检查掘进工作面整体通风状况'
+      : '输入检查项，或上传图片后补充现场描述',
 )
 const headerDescription = computed(() =>
   chat.isViewingTeamConversation && chat.activeTeamConversation
     ? `${chat.activeTeamConversation.teamName || '团队'} · ${chat.activeTeamConversation.owner?.nickname || '团队成员'} 的共享辨识记录`
     : chat.activeConversation
-    ? '上传现场图像并补充描述，系统会生成规程依据明确的辨识报告'
-    : '先新建或选择一个对话，所有辨识记录会自动保存到本机',
+      ? '上传现场图像并补充描述，系统会生成规程依据明确的辨识报告'
+      : '先新建或选择一个对话，所有辨识记录会自动保存到本机',
 )
 
 watch(
