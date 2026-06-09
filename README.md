@@ -2,6 +2,11 @@
 
 本项目基于《煤矿安全规程》通风相关知识，构建 Neo4j 知识图谱、Milvus 向量索引和 GraphRAG 问答流水线，并提供 Django API 与 Vue3 对话前端。系统支持文字问答、SSE 流式输出、基于 Qwen3.5-Omni 的现场图片/多图片隐患辨识，以及传感器数值与规程阈值的交叉验证。
 
+<img width="2560" height="1440" alt="多图识别1" src="https://github.com/user-attachments/assets/fc129ab0-460b-448a-aaf1-15e71c0d74b3" />
+<img width="2560" height="1440" alt="数图结合1" src="https://github.com/user-attachments/assets/bfd6eebc-74e7-4150-ad26-9662429700dc" />
+
+
+
 ## 当前能力
 
 - 图谱 + 向量混合检索，支持多跳 GraphRAG 推理。
