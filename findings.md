@@ -142,3 +142,26 @@
 - Frontend user/chat API clients should never surface a full HTML backend debug page in product UI. Non-JSON responses are now compacted, with a special CSRF Origin message that points to the trusted-origin setting or backend restart. Django CSRF failures also return JSON through `CSRF_FAILURE_VIEW`.
 - DashScope `qwen3.5-omni-plus` validates `max_tokens` with a lower bound of 10. The model-test endpoint originally used `max_tokens=8`, which made the vision probe fail even though the endpoint/key/model were valid.
 - For public deployment, the current `.env` fallback is a cost/security risk: users without their own key would consume the maintainer's model quota. The deployment plan now treats BYOK or explicit tenant-key policy as a required step before public exposure.
+
+## Deployment Decision Findings
+
+- A first deployment should optimize for a stable product URL, not maximum architectural purity. The best current fit is one VPS/ECS running nginx, Django/Gunicorn, Vue static files, Postgres, and persistent media, while graph/vector infrastructure is externalized if free/low-cost limits allow it.
+- 2C4G is only realistic if Neo4j and vector storage are not on the same machine. Milvus standalone is not small-server friendly because official prerequisites list 8 GB RAM minimum and 16 GB recommended; current local compose also runs etcd and MinIO beside Milvus.
+- SQLite remains a local-development database. Production needs Postgres or equivalent durable storage because the app now has real account, team, conversation, attachment, and security event writes.
+- Same-origin nginx routing is the right first UX choice: `/api/*` to Django, `/media/*` to media storage, and `/*` to Vue dist. It keeps session cookies and CSRF simpler than splitting frontend and backend across different domains.
+- Current code currently syncs `settings.value` from `frontend/src/stores/chat.ts` through `updateRemoteProfile()`, and `web_backend/users/views.py` persists normalized `settings.modelConfig` in `UserProfile.settings`. If the deployment policy is `BYOK local-only`, API key fields must be stripped from profile sync and profile responses while still being sent in per-request `model_config`.
+- `BYOK local-only` is the recommended public-beta key policy because it directly prevents ordinary users from consuming the maintainer `.env` key and avoids server-side secret storage obligations. The UX cost is that users must configure model keys per browser/device.
+- `BYOK encrypted server-side` improves cross-device UX but adds encryption-key management, masking, rotation, audit, and incident-response work. It should be treated as a later product/security phase.
+- An admin-managed tenant key is only appropriate for private demos or a tightly controlled user group because it moves all model cost and abuse risk to the maintainer.
+- Media can start as a persistent VPS volume served by nginx for the MVP, but needs explicit backup/retention and size-limit policy. Object storage is the cleaner later choice for multi-instance deployment and large attachments.
+- CI/CD should follow a successful manual production deployment. Automating `git pull && docker compose up --build` before the manual path is proven risks encoding the wrong assumptions.
+
+## Deployment Cost Findings
+
+- Fixed infrastructure can be kept low for a student/public-beta deployment if the app server is a discounted 4C8G VPS/light server and Neo4j/Zilliz stay on free tiers. The realistic maintainer fixed-cost target is roughly 50-150 RMB/month under discounted pricing, but standard on-demand server pricing can be several hundred RMB/month.
+- The largest unpredictable cost is model usage, not nginx/Django/Postgres. `BYOK local-only` keeps public-user model spend off the maintainer account and should be the default unless the deployment is a private controlled demo.
+- DashScope pricing makes text-only requests cheap relative to image recognition. `qwen-plus` is roughly single-digit RMB per million tokens, while `qwen3.5-omni-plus` has much higher output-token pricing and image requests often involve multiple VL calls in this pipeline.
+- Maintainer-paid public image recognition can quickly exceed server cost. A rough budget range is 0.3-1 RMB per single-image recognition and 0.8-3 RMB per three-image fused recognition, depending on image tokenization and output length.
+- Neo4j paid hosting is the first major fixed-cost jump. AuraDB Professional starts at $65.70/month for a 1GB cluster, so AuraDB Free import-size validation should happen before committing to the hosted graph path.
+- Zilliz Cloud Free currently lists 5GB storage, 2.5M vCUs/month, and up to 5 collections, which should be tested before paying for vector infrastructure.
+- Cloudflare R2 is cheap enough for a later media-storage upgrade, with a 10GB-month free tier and $0.015/GB-month standard storage after that, but local persistent media volume is still the lowest-friction MVP path.

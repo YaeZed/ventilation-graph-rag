@@ -11,7 +11,7 @@ Implement the usable part of `docs/plan-model-config-deploy.md`: users can choos
 - Preserve existing text-only, image, multi-image, sensor, and SSE request flows.
 - Reuse the existing global RAG pipeline, Neo4j, and Milvus resources; model changes must not force index rebuilds.
 - Do not revert unrelated dirty worktree changes from the previous sensor/multi-image phase.
-- Deployment scaffolding remains a later phase until runtime model configuration is verified.
+- Deployment scaffolding remains a later phase until runtime model configuration is verified and the hosting/key/data-store choices are explicit.
 
 ## Phases
 
@@ -24,10 +24,12 @@ Implement the usable part of `docs/plan-model-config-deploy.md`: users can choos
 | 5 | complete | Add backend model-config validation and request-scoped pipeline overrides |
 | 6 | complete | Validate backend, frontend build, and smoke request behavior |
 | 7 | complete | Update docs/status/runbook/planning notes |
-| 8 | pending | Plan deployment scaffolding as a separate implementation pass |
+| 8 | complete | Compare deployment choices and document the recommended baseline before writing scaffolding |
 | 9 | complete | Fix local settings-page CSRF failure and avoid rendering backend HTML errors in the UI |
 | 10 | complete | Fix model-test probe token limit for DashScope Omni-compatible vision models |
 | 11 | complete | Reconcile docs and deployment plan around BYOK/user-key policy |
+| 12 | complete | Analyze deployment cost drivers and document budget ranges |
+| 13 | pending | Implement the selected deployment baseline after the user chooses hosting/key/data-store policy |
 
 ## Decisions
 
@@ -41,6 +43,10 @@ Implement the usable part of `docs/plan-model-config-deploy.md`: users can choos
 - Deployment must not let ordinary users consume the maintainer's `.env` model key. The deployment pass needs a BYOK or tenant-key policy before public exposure.
 - Local Vite may fall back from 5173 to 5174 when another dev server is still running. The dev CSRF defaults trust both ports, and frontend API parsing now converts Django HTML debug pages into short actionable errors instead of rendering raw HTML in settings.
 - The model-test probe must use a token limit accepted by all configured providers. DashScope `qwen3.5-omni-plus` rejects `max_tokens < 10`, so the probe uses `MODEL_TEST_MAX_TOKENS = 16`.
+- The recommended first deployment baseline is a 4C8G VPS/ECS running nginx, Django/Gunicorn, Vue static files, Postgres, and persistent media, with Neo4j and vector storage externalized where possible. This avoids trying to run Milvus, Neo4j, torch/BGE, Django, nginx, and media storage on a 2C4G box.
+- Public deployment should default to `BYOK local-only`: user API keys stay in the browser/local request path and are not persisted in `UserProfile.settings`. The current code still syncs `settings.modelConfig` through profile updates, so the implementation pass must strip API keys from profile sync/responses before public exposure.
+- Manual deployment should precede CI/CD. GitHub Actions SSH deploy should only be added after local production compose and one manual server deploy are repeatable.
+- The student/public-beta cost baseline is roughly 50-150 RMB/month fixed cost when using a discounted 4C8G server, free Neo4j/Zilliz tiers, local Postgres, local media volume, and `BYOK local-only`. If the maintainer pays for model usage or Neo4j moves to AuraDB Professional, costs can jump by hundreds of RMB/month.
 
 ## Error Log
 
